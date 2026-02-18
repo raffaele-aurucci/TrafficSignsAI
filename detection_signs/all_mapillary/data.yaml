@@ -1,0 +1,7 @@
+path: ../../datasets/all_mapillary
+train: images/train
+val: images/val
+
+nc: 1
+
+names: ['traffic_sign']
