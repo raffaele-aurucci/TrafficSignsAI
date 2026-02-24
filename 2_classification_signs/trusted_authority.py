@@ -25,8 +25,16 @@ class TrustedAuthority:
         self.pubkey, self.privkey = paillier.generate_paillier_keypair(n_length=key_length)
         self.pickled_pubkey = object_to_pickle_string(self.pubkey)
         self.pickled_privkey = object_to_pickle_string(self.privkey)
-        self.logger.info("Keypair generated successfully.")
 
+        # Save private key
+        import os
+        import pickle
+        os.makedirs('temp_keys', exist_ok=True)
+
+        with open(f'temp_keys/ta_privkey_port_{self.port}.pkl', 'wb') as f:
+            pickle.dump(self.privkey, f)
+
+        self.logger.info("Keypair generated successfully.")
         self._register_handlers()
 
     def _setup_logger(self) -> logging.Logger:

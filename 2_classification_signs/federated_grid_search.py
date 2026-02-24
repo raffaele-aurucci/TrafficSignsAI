@@ -2,6 +2,8 @@ import json
 import threading
 import time
 import itertools
+
+import numpy as np
 import requests
 from requests.exceptions import ConnectionError
 import socketio
@@ -26,6 +28,64 @@ EDGE_NET_MODELS = [
     'ConvNeXt', 'MobileViT', 'EdgeNeXt', 'EfficientFormer',
     'ViT', 'DeiT'
 ]
+
+
+def save_best_model_if_needed(run_summary: Dict, best_weights: List[np.ndarray], lock: multiprocessing.Lock,
+                              models_dir: str, config: Dict) -> None:
+    """
+    Checks whether the current model has a better F1 score.
+    If so, saves the model and copies the private key used to encrypt it
+    into a dedicated subfolder for that model family.
+    """
+    if best_weights is None or run_summary is None:
+        return
+
+    model_name = run_summary.get('model_name', 'unknown')
+    current_f1 = run_summary.get('best_f1', 0.0)
+    ta_port = config['ta_port']  # Retrieve the port used by the TA in this run
+
+    # Create the base directory and define the global scores file
+    os.makedirs(models_dir, exist_ok=True)
+    scores_file = os.path.join(models_dir, 'best_scores.json')
+
+    lock.acquire()
+    try:
+        if os.path.exists(scores_file):
+            with open(scores_file, 'r') as f:
+                best_scores = json.load(f)
+        else:
+            best_scores = {}
+
+        historical_best_f1 = best_scores.get(model_name, -1.0)
+
+        if current_f1 > historical_best_f1:
+            # Update the record in the json file (in the root models folder)
+            best_scores[model_name] = current_f1
+            with open(scores_file, 'w') as f:
+                json.dump(best_scores, f, indent=4)
+
+            # Create the specific subfolder for the model (e.g., saved_models/ResNet18)
+            specific_model_dir = os.path.join(models_dir, model_name)
+            os.makedirs(specific_model_dir, exist_ok=True)
+
+            # Save the encrypted model INSIDE THE SUBFOLDER
+            model_filename = os.path.join(specific_model_dir, f"best_{model_name}.pkl")
+            import pickle
+            with open(model_filename, 'wb') as f:
+                pickle.dump(best_weights, f)
+
+            # Copy the private key INTO THE SUBFOLDER
+            import shutil
+            temp_key_path = f'temp_keys/ta_privkey_port_{ta_port}.pkl'
+            final_key_path = os.path.join(specific_model_dir, f"best_{model_name}_key.pkl")
+
+            if os.path.exists(temp_key_path):
+                shutil.copy(temp_key_path, final_key_path)
+
+            print(
+                f"\n[*] NEW RECORD for {model_name}! F1: {current_f1:.4f}. Data saved in: {specific_model_dir}/\n")
+    finally:
+        lock.release()
 
 
 def get_config_fingerprint(config: Dict, keys: Set[str]) -> FrozenSet[Tuple[str, str]]:
@@ -209,7 +269,13 @@ def run_grid_search_worker(
             if server_instance_ref:
                 run_summary = server_instance_ref[0].aggregator.get_run_summary()
                 if run_summary:
+                    # Save metrics in shared csv
                     append_results_to_csv(config['shared_csv_path'], run_summary, csv_lock)
+
+                    # Save model and private key
+                    best_weights = server_instance_ref[0].aggregator.best_model_weights
+                    models_dir = config.get('base_model_output_path', 'saved_models')
+                    save_best_model_if_needed(run_summary, best_weights, csv_lock, models_dir, config)
 
             time.sleep(1)
 
