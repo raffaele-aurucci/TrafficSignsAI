@@ -14,7 +14,7 @@
     }
   ],
   "common_search_space": {
-    "encryption_mode": ["direct_encrypted_update"],
+    "encryption_mode": ["no_encryption"],
     "device": ["cuda"],
     "global_epoch": [5, 10, 20, 30, 50],
     "local_epoch": [1, 2, 3, 5, 10],

@@ -238,9 +238,16 @@ def run_grid_search_worker(
             # Start the Trusted Authority first, then wait briefly before launching the server
             ta_instance_ref = []
             server_instance_ref = []
-            ta_thread = threading.Thread(target=start_ta_thread, args=(config, ta_instance_ref))
-            ta_thread.start()
-            time.sleep(3)
+
+            # Check if no_encryption is enabled
+            ta_thread = None
+            if config.get('encryption_mode') != 'no_encryption':
+                ta_thread = threading.Thread(target=start_ta_thread, args=(config, ta_instance_ref))
+                ta_thread.start()
+                time.sleep(3)
+            else:
+                print(f"[Worker {worker_id}] Encryption disabled. Skipping TA start.")
+
 
             server_thread = threading.Thread(target=start_server_thread, args=(config, server_instance_ref))
             server_thread.start()
@@ -263,7 +270,9 @@ def run_grid_search_worker(
             except Exception as e:
                 print(f"[Worker {worker_id}] Could not shutdown TA: {e}")
 
-            ta_thread.join(timeout=15)
+            # Shutdown TA
+            if ta_thread is not None:
+                ta_thread.join(timeout=15)
 
             # Collect and persist run results if available
             if server_instance_ref:
