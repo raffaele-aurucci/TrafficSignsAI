@@ -13,8 +13,6 @@ LOCAL DATASET PRUNING MODULE
 ================================================================================
 This module implements decentralized data pruning logic.
 It runs entirely on the edge (client-side), ensuring data privacy. 
-Compatible with the ModelManager and ImageFolder architecture 
-(no dependency on CSV annotation files).
 
   - 1 → compute_influence_scores
   - 2 → adaptive criterion (mu ± epsilon * sigma)
