@@ -159,7 +159,6 @@ class Aggregator:
             return pd.DataFrame()
         return pd.DataFrame.from_dict(self.metrics_history, orient='index')
 
-
     def save_results(self) -> None:
         """Saves metrics to CSV and prepares the final run summary dictionary."""
         metrics_dir = self.config['run_metrics_output_path']
@@ -172,15 +171,15 @@ class Aggregator:
         worker_id = self.config.get('worker_id', 'NA')
         dataset_name = self.config.get('dataset_name', 'unknown')
 
-        # 1. Salva il classico CSV round-by-round
+        # Save the standard round-by-round CSV
         filename = os.path.join(metrics_dir, f"{timestr}_{dataset_name}_worker_{worker_id}.csv")
         metrics_df.to_csv(filename)
         self.logger.info(f"Saved round metrics to {filename}")
 
-        # 2. Prepara il dizionario riassuntivo con i best values e iperparametri
+        # Prepare the summary dictionary with best values and hyperparameters
         self.run_summary = self.config.copy()
 
-        # Etichetta la fase in cui ci troviamo
+        # Label the current execution phase
         is_post_pruning = self.config.get('is_post_pruning_run', False)
         if self.config.get('enable_pruning', False):
             phase = "Post-Pruning" if is_post_pruning else "Pre-Pruning"
@@ -199,7 +198,7 @@ class Aggregator:
             'round_dataframe_path': filename,
         })
 
-        # Pulizia: rimuovi percorsi inutili o dizionari troppo verbosi dal summary
+        # Cleanup: remove unnecessary paths or overly verbose dictionaries from the summary
         keys_to_remove = ['shared_csv_path', 'run_metrics_output_path', 'base_csv_path',
                           'base_log_path', 'base_plot_path', 'base_split_data_path',
                           'ip_address', 'port', 'ta_port', 'splitting_dir', 'early_stop_patience',
@@ -209,10 +208,9 @@ class Aggregator:
         for key in keys_to_remove:
             self.run_summary.pop(key, None)
 
-        # 3. Accoda (Append) il dizionario al CSV Globale in modo SICURO per il multiprocessing
+        # Append the dictionary to the Global CSV SAFELY for multiprocessing
         global_csv_path = os.path.join(base_csv_dir, "global_grid_search_summary.csv")
         summary_df = pd.DataFrame([self.run_summary])
-
 
         csv_lock = self.config.get('csv_lock')
         if csv_lock:
@@ -220,10 +218,10 @@ class Aggregator:
 
         try:
             if not os.path.exists(global_csv_path):
-                # Crea un nuovo file se non esiste
+                # Create a new file if it does not exist
                 summary_df.to_csv(global_csv_path, index=False)
             else:
-                # Leggi quello vecchio, unisci i dati e sovrascrivi per allineare correttamente le colonne
+                # Read the existing one, merge data, and overwrite to align columns correctly
                 existing_df = pd.read_csv(global_csv_path)
                 combined_df = pd.concat([existing_df, summary_df], ignore_index=True)
                 combined_df.to_csv(global_csv_path, index=False)
@@ -234,7 +232,6 @@ class Aggregator:
         finally:
             if csv_lock:
                 csv_lock.release()
-
 
     def get_run_summary(self) -> Dict:
         return self.run_summary

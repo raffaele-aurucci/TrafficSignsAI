@@ -12,8 +12,8 @@ import queue
 import federated_server
 import run_multiple_clients
 
-# --- GLOBAL CONFIGURATIONS ---
-NUM_PARALLEL_EXECUTIONS = 2  # Change this number based on available cores/RAM
+
+NUM_PARALLEL_EXECUTIONS = 2
 GRID_SEARCH_CONFIG_PATH = 'grid_search_config.json'
 
 
