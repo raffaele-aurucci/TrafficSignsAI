@@ -1,0 +1,77 @@
+{
+  "ip_address": "127.0.0.1",
+  "port": 5001,
+  "ta_port": 5002,
+  "base_csv_path": "csv",
+  "base_log_path": "logs",
+  "base_split_data_path": "run_dataset",
+  "base_plot_path": "plots",
+  "early_stop_patience": 10,
+  "weighted_aggregation": true,
+
+  "enable_pruning": true,
+  "pruning_threshold": 1.0,
+  "pruning_score_type": "influence",
+
+  "datasets": [
+    {
+      "name": "Cropped_ROI",
+      "path": "../datasets/Cropped_ROI",
+      "num_classes": 2
+    }
+  ],
+  "common_search_space": {
+    "encryption_mode": ["no_encryption"],
+    "device": ["cuda"],
+    "global_epoch": [5, 10, 20, 30, 50],
+    "local_epoch": [1, 2, 3, 5, 10],
+    "num_clients": [4, 8, 16],
+    "models_percentage": [0.5, 1],
+    "learning_rate": [0.01, 0.001, 0.0001],
+    "batch_size": [16],
+    "aggregation_algorithm": ["FedLC", "FedAvg", "FedProx"],
+    "fedprox_mu": [0.05]
+  },
+  "model_specific_search_space": {
+    "ResNet18": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "ShuffleNetV2": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "ConvNeXt_Atto": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "MobileNetV3_Large": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "EfficientNet_B0": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "MobileViT_Small": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "EdgeNeXt_Small": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "EfficientFormer_L1": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "ViT_Tiny": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    },
+    "DeiT_Tiny": {
+      "image_size": [224],
+      "num_custom_layers": [2, 4]
+    }
+  }
+}
