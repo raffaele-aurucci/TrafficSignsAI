@@ -16,7 +16,7 @@ import federated_server
 import run_multiple_clients
 
 
-NUM_PARALLEL_EXECUTIONS = 1
+NUM_PARALLEL_EXECUTIONS = 2
 GRID_SEARCH_CONFIG_PATH = 'grid_search_config.json'
 
 # Keys used to uniquely identify a specific experiment configuration.
