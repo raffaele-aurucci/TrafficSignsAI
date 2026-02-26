@@ -118,6 +118,7 @@ class FederatedClient:
         self.sio.on('distribute_calibration', self._on_distribute_calibration)
         # [PRUNING] New events
         self.sio.on('start_pruning', self._on_start_pruning)
+        self.sio.on('skip_pruning', self._on_skip_pruning)
         self.sio.on('server_ready_for_new_training', self._on_server_ready_for_new_training)
 
     # ------------------------------------------------------------------
@@ -324,10 +325,11 @@ class FederatedClient:
 
         if data.get('STOP', False):
             if self.enable_pruning:
-                # [PRUNING] Non uscire: aspetta 'start_pruning' o 'shutdown'
+                # [PRUNING] Non uscire: aspetta 'start_pruning' (se selezionato)
+                # oppure 'skip_pruning' (se idle), poi 'server_ready_for_new_training'
                 self.logger.info(
                     "Training phase completed (STOP=True). "
-                    "Pruning enabled — waiting for 'start_pruning' from server."
+                    "Pruning enabled — waiting for 'start_pruning' or 'skip_pruning' from server."
                 )
             else:
                 self.logger.info("Federated training finished. Shutting down client.")
@@ -383,6 +385,18 @@ class FederatedClient:
             self.logger.error("[PRUNING] Critical error during pruning: %s", e, exc_info=True)
             # Emit anyway so the server doesn't hang waiting for this client
             self.sio.emit('complete_pruning')
+
+    def _on_skip_pruning(self):
+        """
+        [PRUNING] Received when this client was NOT selected for the pruning phase.
+        Mirrors the idle behaviour during training rounds: the client does nothing
+        and simply waits for 'server_ready_for_new_training', exactly as it would
+        wait for 'request_update' in a round where it is not picked.
+        """
+        self.logger.info(
+            "[PRUNING] Not selected for pruning this phase (idle). "
+            "Waiting for 'server_ready_for_new_training'."
+        )
 
     def _on_server_ready_for_new_training(self):
         """

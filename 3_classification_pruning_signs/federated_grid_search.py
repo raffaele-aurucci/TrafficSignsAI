@@ -1,5 +1,3 @@
-#TODO: FIX MODELS_PERCENTAGE = 0.5
-
 import json
 import threading
 import time
@@ -18,7 +16,7 @@ import federated_server
 import run_multiple_clients
 
 # Configuration Constants
-NUM_PARALLEL_EXECUTIONS = 2
+NUM_PARALLEL_EXECUTIONS = 1
 GRID_SEARCH_CONFIG_PATH = 'grid_search_config.json'
 
 # Keys used to uniquely identify a specific experiment configuration
@@ -350,7 +348,7 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
             config['worker_id'] = worker_id
             config['port'] = base_port + (worker_id * 2)
             config['ta_port'] = base_port + (worker_id * 2) + 1
-            config["MIN_NUM_WORKERS"] = int(config['num_clients'] * config['models_percentage'])
+            config['MIN_NUM_WORKERS'] = int(config['num_clients'] * config['models_percentage'])
             config['csv_lock'] = csv_lock
 
             run_identifier = f"{dataset_name}_{model_name}_w{worker_id}"

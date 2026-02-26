@@ -32,13 +32,21 @@ class FederatedServer:
     Pruning flow (when enable_pruning=True):
       1. First FL training completes (max rounds or early stopping).
       2. Server saves first-phase results via aggregator.save_results().
-      3. Server emits 'start_pruning' to all clients with current weights.
+      3. Server emits 'start_pruning' to ALL clients (pruning_participation=1.0)
+         or to a configurable fraction (pruning_participation<1.0).
       4. Each client prunes its local dataset in-place and emits 'complete_pruning'.
-      5. When all clients are done, server resets its state and emits
+      5. When all pruning clients are done, server resets its state and emits
          'server_ready_for_new_training'.
       6. Clients reinitialize their ModelManager and emit 'client_ready'.
-      7. A full second FL training run starts on the pruned data.
+      7. A full second FL training run starts on the pruned data, using
+         post_pruning_models_percentage to select clients per round.
       8. Second run completes → normal shutdown.
+
+    Key parameters (in config):
+      - models_percentage        : fraction of clients per round in PRE-pruning training.
+      - pruning_participation    : fraction of clients that perform local pruning (default 1.0).
+      - post_pruning_models_pct  : fraction of clients per round in POST-pruning training
+                                   (defaults to models_percentage if not set).
     """
 
     def __init__(self, config: Dict):
@@ -71,9 +79,16 @@ class FederatedServer:
 
         # [PRUNING] Pruning orchestration state
         self.enable_pruning: bool = self.config.get('enable_pruning', False)
-        self.pruning_phase_done: bool = False   # True after pruning completes (prevents second pruning)
-        self.pruning_complete_count: int = 0    # How many clients finished pruning
-        self.logger.info("Pruning: %s", "ENABLED" if self.enable_pruning else "DISABLED")
+        self.pruning_phase_done: bool = False
+        self.pruning_complete_count: int = 0
+        self.expected_pruning_clients: Set[str] = set()
+
+        self.logger.info(
+            "Pruning: %s | clients per round (pre and post): %d/%d (models_percentage=%.2f)",
+            "ENABLED" if self.enable_pruning else "DISABLED",
+            self.min_num_workers, self.config['num_clients'],
+            self.config.get('models_percentage', 1.0)
+        )
 
         # Flask & SocketIO setup
         self.app = Flask(__name__)
@@ -129,7 +144,7 @@ class FederatedServer:
         self.socketio.on('client_ready')(self._on_client_ready)
         self.socketio.on('client_update')(self._on_client_update)
         self.socketio.on('client_eval')(self._on_client_eval)
-        # [PRUNING] New handler
+        # [PRUNING] Pruning completion handler
         self.socketio.on('complete_pruning')(self._on_complete_pruning)
 
     def _health_check(self):
@@ -141,7 +156,11 @@ class FederatedServer:
     # ------------------------------------------------------------------
 
     def _start_next_training_round(self) -> None:
-        """Increments round counter, selects clients, and broadcasts the update request."""
+        """
+        Increments round counter, selects clients using min_num_workers
+        (same ratio for both pre- and post-pruning training), and broadcasts
+        the update request to selected clients only.
+        """
         self.current_round += 1
         self.logger.info("--- Starting Round %d ---", self.current_round)
 
@@ -162,7 +181,10 @@ class FederatedServer:
             'total_training_size': self.total_training_size_in_round,
         }
 
-        self.logger.info("Requesting updates from clients: %s", selected_clients)
+        self.logger.info(
+            "Requesting updates from %d/%d clients: %s",
+            self.min_num_workers, len(all_available_clients), selected_clients
+        )
         for sid in selected_clients:
             emit('request_update', request_data, room=sid)
 
@@ -215,52 +237,78 @@ class FederatedServer:
 
     def _start_pruning_phase(self) -> None:
         """
-        [PRUNING] Emits 'start_pruning' to all clients with the current
-        aggregated model weights. Uses the same payload structure as
-        'stop_and_eval' so clients can reuse _process_server_weights
-        (including transparent decryption for encrypted modes).
+        [PRUNING] Seleziona casualmente un sottoinsieme di client usando la stessa
+        logica dei round di training (min_num_workers client estratti da registered_clients).
+
+        - I client selezionati ricevono 'start_pruning' e prunano il dataset locale.
+        - I client NON selezionati ricevono 'skip_pruning' e rimangono idle,
+          esattamente come nei round di training in cui non vengono scelti.
+        - La valutazione post-pruning resta su TUTTI i client (identico al training).
         """
-        self.logger.info("[PRUNING] Starting pruning phase. Notifying %d clients.",
-                         len(self.registered_clients))
+        all_available_clients = list(self.registered_clients)
+
+        # Stessa estrazione casuale usata in _start_next_training_round
+        selected_clients = random.sample(all_available_clients, self.min_num_workers)
+        idle_clients = [sid for sid in all_available_clients if sid not in selected_clients]
+
+        self.expected_pruning_clients = set(selected_clients)
         self.pruning_complete_count = 0
+
+        self.logger.info(
+            "[PRUNING] Pruning phase started: %d/%d clients selected "
+            "(same ratio as training rounds via models_percentage).",
+            len(selected_clients), len(all_available_clients)
+        )
 
         data_to_send = {
             'current_weights': object_to_pickle_string(self.aggregator.current_weights),
             'total_training_size': self.total_training_size_in_round,
         }
 
-        for sid in self.registered_clients:
+        # Client selezionati: prunano il dataset
+        for sid in selected_clients:
             emit('start_pruning', data_to_send, room=sid)
+
+        # Client idle: notifica esplicita di restare in attesa, come nei round di training
+        for sid in idle_clients:
+            emit('skip_pruning', room=sid)
+            self.logger.info("[PRUNING] Client %s set to idle (not selected for pruning).", sid)
 
     def _on_complete_pruning(self):
         """
-        [PRUNING] Receives a pruning-complete notification from a client.
-        Once all registered clients have finished, resets the server state
-        and starts a new FL training run on the pruned datasets.
+        [PRUNING] Receives pruning completion from selected clients.
+        When all expected clients have finished, resets server state and
+        notifies ALL clients to reinitialize for the post-pruning training run.
         """
         with self.lock:
+            if request.sid not in self.expected_pruning_clients:
+                return
+
             self.pruning_complete_count += 1
             self.logger.info(
                 "[PRUNING] Client %s completed pruning (%d/%d).",
-                request.sid, self.pruning_complete_count, len(self.registered_clients)
+                request.sid, self.pruning_complete_count, len(self.expected_pruning_clients)
             )
 
-            if self.pruning_complete_count >= len(self.registered_clients):
+            if self.pruning_complete_count >= len(self.expected_pruning_clients):
                 self.logger.info(
-                    "[PRUNING] All clients finished. Resetting server for second training phase."
+                    "[PRUNING] All %d selected clients finished pruning. "
+                    "Resetting server for post-pruning training phase.",
+                    len(self.expected_pruning_clients)
                 )
                 self._reset_for_new_training()
 
-                # Signal clients to reinitialize their ModelManager and send client_ready
+                # Notify ALL clients (pruned and non-pruned) to reinitialize
                 for sid in self.registered_clients:
                     emit('server_ready_for_new_training', room=sid)
 
     def _reset_for_new_training(self) -> None:
         """
         [PRUNING] Resets all training state so a fresh FL run can start
-        on the pruned datasets...
+        on the pruned datasets. The post-pruning run uses the same
+        min_num_workers per round as the pre-pruning run.
         """
-        self.logger.info("[PRUNING] Resetting server state for new training phase...")
+        self.logger.info("[PRUNING] Resetting server state for post-pruning training phase...")
 
         self.current_round = -1
         self.is_training_finished = False
@@ -270,6 +318,7 @@ class FederatedServer:
         self.client_stats_buffer.clear()
         self.total_training_size_in_round = 0
         self.static_calibration_term = None
+        self.expected_pruning_clients.clear()
 
         self.config['is_post_pruning_run'] = True
 
@@ -403,12 +452,11 @@ class FederatedServer:
                 if self.enable_pruning and not self.pruning_phase_done:
                     self.logger.info(
                         "[PRUNING] First training phase ended. "
-                        "Launching pruning phase before second training run."
+                        "Launching pruning phase before post-pruning training run."
                     )
-                    self.pruning_phase_done = True   # Mark so second run shuts down normally
+                    self.pruning_phase_done = True
                     self._start_pruning_phase()
                 else:
-                    # Either pruning is disabled, or this is already the second (post-pruning) run
                     self.logger.info("Federated process fully complete. Shutting down.")
                     for sid in self.registered_clients:
                         emit("shutdown", room=sid)
