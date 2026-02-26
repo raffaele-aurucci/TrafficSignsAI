@@ -6,11 +6,10 @@
   "base_log_path": "logs",
   "base_split_data_path": "run_dataset",
   "base_plot_path": "plots",
-  "early_stop_patience": 10,
+  "early_stop_patience": 5,
   "weighted_aggregation": true,
 
   "enable_pruning": true,
-  "pruning_threshold": 1.0,
   "pruning_score_type": "influence",
 
   "datasets": [
@@ -23,14 +22,15 @@
   "common_search_space": {
     "encryption_mode": ["no_encryption"],
     "device": ["cuda"],
-    "global_epoch": [5, 10, 20, 30, 50],
-    "local_epoch": [1, 2, 3, 5, 10],
-    "num_clients": [4, 8, 10],
+    "global_epoch": [10, 30, 50],
+    "local_epoch": [1, 3, 5],
+    "num_clients": [4, 8],
     "models_percentage": [0.5, 1],
     "learning_rate": [0.01, 0.001, 0.0001],
     "batch_size": [16],
     "aggregation_algorithm": ["FedLC", "FedAvg", "FedProx"],
-    "fedprox_mu": [0.05]
+    "fedprox_mu": [0.05],
+    "pruning_threshold": [0.5, 1]
   },
   "model_specific_search_space": {
     "ResNet18": {

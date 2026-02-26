@@ -15,24 +15,40 @@ from typing import Dict, Set, FrozenSet, Tuple
 import federated_server
 import run_multiple_clients
 
-# Configuration Constants
+
 NUM_PARALLEL_EXECUTIONS = 1
 GRID_SEARCH_CONFIG_PATH = 'grid_search_config.json'
 
-# Keys used to uniquely identify a specific experiment configuration
+# Keys used to uniquely identify a specific experiment configuration.
+# If these parameters are identical, the experiment is considered the same.
 MATCH_KEYS = [
     'model_name', 'global_epoch', 'local_epoch', 'num_clients', 'learning_rate',
     'models_percentage', 'aggregation_algorithm', 'pruning_threshold', 'num_custom_layers'
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # FINGERPRINT HELPERS (O(1) lookup instead of O(n) per config)
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+
+def _normalize_fp_value(v) -> str:
+    """
+    Normalizes a config value to a canonical string for fingerprinting.
+    Avoids mismatches like '1' vs '1.0' or '0.5' vs '.5'.
+    Integer-valued floats are stored without decimals (1.0 -> "1").
+    """
+    try:
+        f = float(v)
+        return str(int(f)) if f == int(f) else str(f)
+    except (ValueError, TypeError):
+        return str(v)
+
 
 def make_config_fingerprint(config: dict) -> FrozenSet[Tuple[str, str]]:
     """Creates a hashable fingerprint from the config using only MATCH_KEYS."""
-    return frozenset((k, str(config[k])) for k in MATCH_KEYS if k in config)
+    return frozenset(
+        (k, _normalize_fp_value(config[k])) for k in MATCH_KEYS if k in config
+    )
 
 
 def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
@@ -41,8 +57,7 @@ def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
       - completed : configs with at least one 'Post-Pruning' row -> skip
       - pre_only  : configs with only 'Pre-Pruning' -> incomplete, needs restart
 
-    This replaces is_already_tested() in the main loop,
-    reducing duplicate-check cost from O(n) to O(1) per config.
+    This reduces duplicate-check cost from O(n) to O(1) per config.
     """
     completed: Set[FrozenSet] = set()
     pre_only: Set[FrozenSet] = set()
@@ -60,7 +75,8 @@ def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
 
     for _, row in df.iterrows():
         fp = frozenset(
-            (k, str(row[k])) for k in MATCH_KEYS
+            (k, _normalize_fp_value(row[k]))
+            for k in MATCH_KEYS
             if k in row and pd.notna(row[k]) and str(row[k]) != ''
         )
         phase = str(row.get('execution_phase', ''))
@@ -74,12 +90,49 @@ def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
     return completed, incomplete
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLEANUP FOR INCOMPLETE RUNS
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# CLEANUP AND DUPLICATE HANDLING
+# =============================================================================
+
+def remove_duplicate_configurations(global_csv_path: str) -> None:
+    """
+    Reads the CSV and removes duplicate rows based exclusively
+    on MATCH_KEYS and the execution_phase.
+    This safely ignores dynamic columns like paths, duration, and metrics.
+    """
+    if not os.path.exists(global_csv_path):
+        return
+
+    try:
+        df = pd.read_csv(global_csv_path, dtype=str)
+    except Exception as e:
+        print(f"[CLEANUP ERROR] Cannot read CSV: {e}")
+        return
+
+    if df.empty or 'execution_phase' not in df.columns:
+        return
+
+    original_rows = len(df)
+
+    # Identify duplicates using ONLY the configuration keys + the phase.
+    # Ensure we only check keys that are actually present in the CSV columns.
+    subset_keys = [k for k in MATCH_KEYS if k in df.columns] + ['execution_phase']
+
+    # keep='last' keeps the most recent execution and discards the older ones.
+    df_cleaned = df.drop_duplicates(subset=subset_keys, keep='last')
+
+    cleaned_rows = len(df_cleaned)
+    removed_count = original_rows - cleaned_rows
+
+    if removed_count > 0:
+        print(f"[CLEANUP] Removed {removed_count} duplicate rows from the CSV.")
+        df_cleaned.to_csv(global_csv_path, index=False)
+    else:
+        print("[CLEANUP] No duplicates found in the CSV.")
+
 
 def cleanup_incomplete_run(config: dict, global_csv_path: str,
-                            models_dir: str, lock: multiprocessing.Lock) -> None:
+                           models_dir: str, lock: multiprocessing.Lock) -> None:
     """
     Handles an incomplete run (only Pre-Pruning present in CSV):
       1. Removes orphan rows from the CSV.
@@ -96,11 +149,11 @@ def cleanup_incomplete_run(config: dict, global_csv_path: str,
     except Exception:
         return
 
-    # Identify orphan rows
+    # Identify orphan rows matching the current config
     mask = pd.Series([True] * len(df))
     for k in MATCH_KEYS:
         if k in config and k in df.columns:
-            mask &= (df[k].astype(str) == str(config[k]))
+            mask &= (df[k].astype(str).apply(_normalize_fp_value) == _normalize_fp_value(config[k]))
     matched_indices = df[mask].index
 
     if len(matched_indices) == 0:
@@ -175,9 +228,9 @@ def cleanup_incomplete_run(config: dict, global_csv_path: str,
         _do_cleanup()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # BEST MODEL SAVING
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def save_best_model_if_needed(run_summary: dict, best_weights: list, lock: multiprocessing.Lock,
                               models_dir: str, config: dict, phase: str) -> None:
@@ -254,9 +307,9 @@ def save_best_model_if_needed(run_summary: dict, best_weights: list, lock: multi
         lock.release()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def load_json(filename: str) -> dict:
     with open(filename) as f:
@@ -288,9 +341,9 @@ def wait_for_server_ready(url: str, timeout: int = 60) -> bool:
     return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # SERVER THREAD
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def start_server_thread(config: dict, server_instance_ref: list) -> None:
     """
@@ -320,15 +373,15 @@ def start_server_thread(config: dict, server_instance_ref: list) -> None:
     print(f"[Worker {worker_id}] Server terminated.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # WORKER PROCESS
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQueue, base_port: int,
                            csv_lock: multiprocessing.Lock) -> None:
     """
     Worker process that pulls configurations from the queue and starts
-     the full FL cycle (Server + Clients) for each.
+    the full FL cycle (Server + Clients) for each.
     """
     print(f"--- Starting Grid Search Worker {worker_id} ---")
     while True:
@@ -372,7 +425,7 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
 
             server_thread.join()
 
-            # ── WEIGHT SAVING (PRE & POST PRUNING) ──────────────────────────
+            # -- WEIGHT SAVING (PRE & POST PRUNING) --------------------------
             if server_instance_ref:
                 server_obj = server_instance_ref[0]
                 models_dir = config.get('base_model_output_path', 'saved_models')
@@ -388,7 +441,7 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
                 if post_agg and post_agg.best_model_weights is not None:
                     save_best_model_if_needed(post_agg.run_summary, post_agg.best_model_weights,
                                               csv_lock, models_dir, config, phase="Post-Pruning")
-            # ───────────────────────────────────────────────────────────────
+            # ---------------------------------------------------------------
 
             time.sleep(1)
 
@@ -398,9 +451,9 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
             task_queue.task_done()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # MAIN
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def main():
     base_grid_config = load_json(GRID_SEARCH_CONFIG_PATH)
@@ -423,13 +476,17 @@ def main():
     models_dir = base_grid_config.get('base_model_output_path', 'saved_models')
     os.makedirs(models_dir, exist_ok=True)
 
-    # ── KEY OPTIMIZATION ────────────────────────────────────────────────────
+    # -- DUPLICATE CLEANUP ---------------------------------------------------
+    print("Checking and removing any duplicate configurations in the CSV...")
+    remove_duplicate_configurations(global_csv_path)
+
+    # -- KEY OPTIMIZATION ----------------------------------------------------
     # Reads the CSV once to build fingerprint sets.
     print("Building fingerprint sets from existing CSV (one-time read)...")
     completed_fps, incomplete_fps = build_fingerprint_sets(global_csv_path)
     print(f"  Completed configs (Post-Pruning present): {len(completed_fps)}")
     print(f"  Incomplete configs (Pre-Pruning only):    {len(incomplete_fps)}")
-    # ───────────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
 
     configs_to_run_count = 0
     total_generated_configs = 0
