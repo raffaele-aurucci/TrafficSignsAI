@@ -82,6 +82,8 @@ class FederatedServer:
         self.pruning_phase_done: bool = False
         self.pruning_complete_count: int = 0
         self.expected_pruning_clients: Set[str] = set()
+        # Buffer to hold pruning stats across the aggregator reset
+        self._pending_pruning_stats: List[Dict] = []
 
         self.logger.info(
             "Pruning: %s | clients per round (pre and post): %d/%d (models_percentage=%.2f)",
@@ -274,15 +276,29 @@ class FederatedServer:
             emit('skip_pruning', room=sid)
             self.logger.info("[PRUNING] Client %s set to idle (not selected for pruning).", sid)
 
-    def _on_complete_pruning(self):
+    def _on_complete_pruning(self, data: Dict = None):
         """
-        [PRUNING] Receives pruning completion from selected clients.
+        [PRUNING] Receives pruning completion (and stats) from selected clients.
         When all expected clients have finished, resets server state and
         notifies ALL clients to reinitialize for the post-pruning training run.
         """
         with self.lock:
             if request.sid not in self.expected_pruning_clients:
                 return
+
+            # Accumulate pruning stats on the server so they survive the aggregator reset
+            # The client wraps stats in {'pruning_stats': {...}}, so unwrap it first.
+            if data and isinstance(data, dict):
+                stats = data.get('pruning_stats', data)
+                if stats:
+                    self._pending_pruning_stats.append(stats)
+                    self.logger.info(
+                        "[PRUNING] Stats received from %s: before=%d after=%d (%.1f%% reduction).",
+                        request.sid,
+                        stats.get('samples_before', 0),
+                        stats.get('samples_after', 0),
+                        stats.get('reduction_pct', 0.0),
+                    )
 
             self.pruning_complete_count += 1
             self.logger.info(
@@ -324,6 +340,16 @@ class FederatedServer:
 
         # Fresh aggregator: clean metrics + re-initialized weights for fair comparison
         self.aggregator = Aggregator(self.config, self.logger)
+
+        # Transfer pruning stats collected during the pruning phase to the new aggregator
+        # so they are included in the Post-Pruning save_results() summary.
+        if self._pending_pruning_stats:
+            self.aggregator.collect_pruning_stats(self._pending_pruning_stats)
+            self.logger.info(
+                "[PRUNING] Transferred %d pruning stat records to the new aggregator.",
+                len(self._pending_pruning_stats)
+            )
+            self._pending_pruning_stats.clear()
 
         self.logger.info("[PRUNING] Server reset complete. Waiting for client_ready signals...")
 

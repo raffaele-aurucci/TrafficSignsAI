@@ -371,20 +371,26 @@ class FederatedClient:
                 self.dataset_path, threshold, device
             )
 
-            prune_and_redistribute_client_dataset(
+            pruning_stats = prune_and_redistribute_client_dataset(
                 model=pytorch_model,
                 client_root=self.dataset_path,
                 thresholds=threshold,
                 device=device
             )
 
-            self.logger.info("[PRUNING] Pruning complete. Emitting 'complete_pruning'.")
-            self.sio.emit('complete_pruning')
+            self.logger.info(
+                "[PRUNING] Pruning complete. Reduction: %.1f%% (%d -> %d samples). "
+                "Emitting 'complete_pruning'.",
+                pruning_stats.get('reduction_pct', 0),
+                pruning_stats.get('samples_before', 0),
+                pruning_stats.get('samples_after', 0),
+            )
+            self.sio.emit('complete_pruning', {'pruning_stats': pruning_stats})
 
         except Exception as e:
             self.logger.error("[PRUNING] Critical error during pruning: %s", e, exc_info=True)
             # Emit anyway so the server doesn't hang waiting for this client
-            self.sio.emit('complete_pruning')
+            self.sio.emit('complete_pruning', {'pruning_stats': {}})
 
     def _on_skip_pruning(self):
         """

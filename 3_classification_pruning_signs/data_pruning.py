@@ -12,12 +12,18 @@ from tqdm import tqdm
 LOCAL DATASET PRUNING MODULE
 ================================================================================
 This module implements decentralized data pruning logic.
-It runs entirely on the edge (client-side), ensuring data privacy. 
+It runs entirely on the edge (client-side), ensuring data privacy.
 
   - 1 → compute_influence_scores
-  - 2 → adaptive criterion (mu ± epsilon * sigma)
+  - 2 → adaptive criterion with z-score normalization (z ∈ [-ε, +ε])
   - 3 → class safeguard
   - 4 → physical dataset reconstruction
+
+Z-score normalization ensures that ε has a consistent, architecture-independent
+meaning: "how many standard deviations from the center to keep".
+  - ε = 1.0 → ~68% of samples kept  (normal distribution assumption)
+  - ε = 2.0 → ~95% of samples kept
+  - ε = 0.5 → ~38% of samples kept
 """
 
 
@@ -25,36 +31,21 @@ It runs entirely on the edge (client-side), ensuring data privacy.
 #                  INFLUENCE SCORE CALCULATION
 # ============================================================
 def compute_influence_scores(model, dataset, device="cpu"):
-    """
-    [1 - Definition of Influence Score]
-
-    Calculates the influence score for each sample as the L2 norm of the
-    gradient of the last trainable layer. Avoids Hessian calculation,
-    making it lightweight for edge devices.
-
-    Args:
-        model:   PyTorch model (typically self.local_model.model).
-        dataset: Concatenated local dataset (Train + Valid).
-        device:  'cpu' or 'cuda'.
-
-    Returns:
-        np.ndarray: Influence score for each sample (same order as dataset).
-    """
-    print("[PRUNING] Computing influence scores...")
     model.eval()
     criterion = torch.nn.CrossEntropyLoss()
-
-    # Batch size 1: required for exact per-sample gradient
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    # Identify the last trainable parameter of the model
-    last_layer = None
-    for param in model.parameters():
-        if param.requires_grad:
-            last_layer = param
+    # Find the last trainable Linear module
+    last_linear = None
+    for module in model.modules():
+        if isinstance(module, torch.nn.Linear) and any(p.requires_grad for p in module.parameters()):
+            last_linear = module
 
-    if last_layer is None:
-        raise ValueError("[PRUNING] No trainable parameters found in the model.")
+    if last_linear is None:
+        raise ValueError("[PRUNING] No trainable Linear layer found.")
+
+    # Collect all parameters of the layer (weight + bias)
+    last_layer_params = [p for p in last_linear.parameters() if p.requires_grad]
 
     scores = []
     for x, y in tqdm(dataloader, desc="Computing Influence Scores"):
@@ -64,15 +55,16 @@ def compute_influence_scores(model, dataset, device="cpu"):
         output = model(x)
         loss = criterion(output, y)
 
-        # Gradient only on the last layer (lighter than loss.backward())
         grads = torch.autograd.grad(
-            loss, last_layer,
+            loss,
+            last_layer_params,
             retain_graph=False,
             create_graph=False
-        )[0]
+        )
 
-        # Influence Score = L2 norm of the gradient
-        scores.append(grads.norm().item())
+        # L2 norm concatenated over weight and bias gradients
+        combined_norm = torch.cat([g.flatten() for g in grads]).norm().item()
+        scores.append(combined_norm)
 
     return np.array(scores)
 
@@ -82,11 +74,15 @@ def compute_influence_scores(model, dataset, device="cpu"):
 # ============================================================
 def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, device="cpu"):
     """
-    [2;3;4 - Adaptive Criterion and Class Safeguard]
+    [2;3;4 - Adaptive Criterion with Z-score Normalization and Class Safeguard]
 
-    Calculates influence scores, applies the adaptive statistical criterion
-    per class, activates the safeguard if necessary, and physically rebuilds
-    the train/ and valid/ folders in-place.
+    Calculates influence scores, applies z-score normalization per class,
+    filters samples within [-ε, +ε] z-score range, activates the safeguard
+    if necessary, and physically rebuilds the train/ and valid/ folders in-place.
+
+    Z-score normalization makes ε architecture-independent: the same ε value
+    produces consistent pruning aggressiveness regardless of whether the model
+    is a MobileNet, ViT, EfficientNet, etc.
 
     Expected structure of client_root:
         client_root/
@@ -140,13 +136,23 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
             print(f"  -> Class '{cls_name}': SKIPPED (kept all {len(indices)})")
             continue
 
-        # Statistical limits: mu ± (epsilon * sigma)
+        # Z-score normalization
         mu = cls_scores.mean()
         sigma = cls_scores.std()
-        lower_bound = mu - (eps * sigma)
-        upper_bound = mu + (eps * sigma)
 
-        in_range = (cls_scores >= lower_bound) & (cls_scores <= upper_bound)
+        # Edge case: all scores are identical → zero variance, keep everything
+        if sigma < 1e-8:
+            keep_mask[indices] = True
+            print(f"  -> Class '{cls_name}': zero variance, kept all {len(indices)} "
+                  f"(mu={mu:.4f}, sigma≈0)")
+            continue
+
+        z_scores = (cls_scores - mu) / sigma
+
+        # Criterion: keep samples within [-ε, +ε] in z-score space.
+        # ε is now architecture-independent: same ε = same % of distribution
+        # regardless of the model's gradient magnitude scale.
+        in_range = (z_scores >= -eps) & (z_scores <= eps)
         kept_indices_local = indices[in_range]
 
         # CLASS SAFEGUARD: ensures minimum 10% of original or 15 samples
@@ -157,10 +163,12 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
                   f"Activating class safeguard.")
             needed = min_samples - len(kept_indices_local)
 
-            # Recover discarded samples with the LOWEST score (prototypical, less noisy)
-            rejected_indices_local = indices[~in_range]
-            rejected_scores = scores[rejected_indices_local]
-            best_rejected_idx = np.argsort(rejected_scores)[:needed]
+            # Recover discarded samples closest to the center (lowest |z-score|)
+            # i.e. the most "prototypical" samples among those discarded
+            rejected_mask = ~in_range
+            rejected_indices_local = indices[rejected_mask]
+            rejected_abs_z = np.abs(z_scores[rejected_mask])
+            best_rejected_idx = np.argsort(rejected_abs_z)[:needed]
             recovered = rejected_indices_local[best_rejected_idx]
             kept_indices_local = np.concatenate([kept_indices_local, recovered])
 
@@ -169,7 +177,8 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
               f"(eps={eps:.2f}, mu={mu:.4f}, sigma={sigma:.4f})")
 
     # Physical in-place reconstruction
-    _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_names, keep_mask)
+    pruning_stats = _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_names, keep_mask)
+    return pruning_stats
 
 
 # ============================================================
@@ -281,3 +290,11 @@ def _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_name
     print(f"  Samples: {total_kept}/{total_original} kept (reduction: {reduction_pct:.1f}%)")
     print(f"  Train: {count_train} | Valid: {count_valid}"
           + (f" | Skipped: {skipped}" if skipped > 0 else ""))
+
+    return {
+        'samples_before': total_original,
+        'samples_after': total_kept,
+        'reduction_pct': round(reduction_pct, 2),
+        'train_kept': count_train,
+        'valid_kept': count_valid,
+    }

@@ -29,6 +29,9 @@ class Aggregator:
         self.prev_test_loss: float = None
         self.early_stop_counter: int = 0
 
+        # [PRUNING] Aggregated pruning statistics (collected from clients)
+        self.pruning_stats: List[Dict] = []
+
         self.training_start_time: float = time.time()
         self.run_summary: Dict = None
 
@@ -145,6 +148,33 @@ class Aggregator:
         self.prev_test_loss = avg_loss
         return self.early_stop_counter >= self.config['early_stop_patience']
 
+    def collect_pruning_stats(self, client_pruning_updates: List[Dict]) -> None:
+        """
+        [PRUNING] Aggregates per-client pruning statistics received after the
+        pruning phase. Stores averages and per-client detail in self.pruning_stats.
+
+        Each element of client_pruning_updates should be the 'pruning_stats' dict
+        sent by the client via 'complete_pruning', e.g.:
+            {'samples_before': 500, 'samples_after': 380, 'reduction_pct': 24.0, ...}
+        """
+        valid = [s for s in client_pruning_updates if s]
+        if not valid:
+            self.logger.warning("[PRUNING] No valid pruning stats received from clients.")
+            return
+
+        self.pruning_stats = valid
+
+        avg_reduction = np.mean([s.get('reduction_pct', 0) for s in valid])
+        total_before = sum(s.get('samples_before', 0) for s in valid)
+        total_after = sum(s.get('samples_after', 0) for s in valid)
+        overall_reduction = (1 - total_after / max(total_before, 1)) * 100
+
+        self.logger.info(
+            "[PRUNING] Stats collected from %d clients — "
+            "avg per-client reduction: %.1f%%, overall: %d -> %d samples (%.1f%%)",
+            len(valid), avg_reduction, total_before, total_after, overall_reduction
+        )
+
     def log_best_model_stats(self):
         """Logs a summary of the best performing round."""
         self.logger.info("=" * 30)
@@ -197,6 +227,20 @@ class Aggregator:
             'total_duration_sec': time.time() - self.training_start_time,
             'round_dataframe_path': filename,
         })
+
+        # [PRUNING] Add aggregated pruning statistics if available
+        if self.pruning_stats:
+            reductions = [s.get('reduction_pct', 0) for s in self.pruning_stats]
+            total_before = sum(s.get('samples_before', 0) for s in self.pruning_stats)
+            total_after = sum(s.get('samples_after', 0) for s in self.pruning_stats)
+            self.run_summary.update({
+                'pruning_num_clients': len(self.pruning_stats),
+                'pruning_avg_reduction_pct': round(float(np.mean(reductions)), 2),
+                'pruning_min_reduction_pct': round(float(np.min(reductions)), 2),
+                'pruning_max_reduction_pct': round(float(np.max(reductions)), 2),
+                'pruning_total_samples_before': total_before,
+                'pruning_total_samples_after': total_after,
+            })
 
         # Cleanup: remove unnecessary paths or overly verbose dictionaries from the summary
         keys_to_remove = ['shared_csv_path', 'run_metrics_output_path', 'base_csv_path',

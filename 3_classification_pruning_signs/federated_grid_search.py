@@ -385,13 +385,20 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
     """
     print(f"--- Starting Grid Search Worker {worker_id} ---")
     while True:
+        # 1. Fetch from queue
         try:
-            config = task_queue.get()
-            if config is None:
-                print(f"--- Worker {worker_id} received stop signal. Shutting down. ---")
-                task_queue.task_done()
-                break
+            config = task_queue.get(timeout=1)
+        except queue.Empty:
+            continue
 
+        # 2. Check for stop signal (poison pill)
+        if config is None:
+            print(f"--- Worker {worker_id} received stop signal. Shutting down. ---")
+            task_queue.task_done()
+            break
+
+        # 3. Process the task
+        try:
             dataset_name = config['dataset_name']
             model_name = config['model_name']
 
@@ -445,9 +452,10 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
 
             time.sleep(1)
 
-        except queue.Empty:
-            continue
+        except Exception as e:
+            print(f"[Worker {worker_id}] Error during execution: {e}")
         finally:
+            # 4. Signal that the task is finished only after processing it
             task_queue.task_done()
 
 
