@@ -30,48 +30,44 @@
     "batch_size": [16],
     "aggregation_algorithm": ["FedLC", "FedAvg", "FedProx"],
     "fedprox_mu": [0.05],
-    "pruning_threshold": [0.5, 1]
+    "pruning_threshold": [1.0]
   },
   "model_specific_search_space": {
     "ResNet18": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
-    },
-    "ShuffleNetV2": {
-      "image_size": [224],
-      "num_custom_layers": [2, 4]
-    },
-    "ConvNeXt_Atto": {
-      "image_size": [224],
-      "num_custom_layers": [2, 4]
-    },
-    "MobileNetV3_Large": {
-      "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
     },
     "EfficientNet_B0": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
+    },
+    "ConvNeXt_Atto": {
+      "image_size": [224],
+      "num_custom_layers": [2]
     },
     "MobileViT_Small": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
     },
     "EdgeNeXt_Small": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
     },
     "EfficientFormer_L1": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
-    },
-    "ViT_Tiny": {
-      "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
     },
     "DeiT_Tiny": {
       "image_size": [224],
-      "num_custom_layers": [2, 4]
+      "num_custom_layers": [2]
+    },
+    "TinyViT_5M": {
+      "image_size": [224],
+      "num_custom_layers": [2]
+    },
+    "CrossViT_Tiny": {
+      "image_size": [240],
+      "num_custom_layers": [2]
     }
   }
 }

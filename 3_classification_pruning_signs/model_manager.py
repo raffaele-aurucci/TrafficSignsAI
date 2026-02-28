@@ -16,18 +16,26 @@ class ModelManager:
     Handles creation, training, and evaluation of neural network models.
     Supports lightweight CNNs, hybrid architectures, and Vision Transformers
     suitable for edge devices and federated learning clients.
+
+    Model categories:
+      CNN (pure):   ResNet18, EfficientNet_B0, ConvNeXt_Atto
+      Hybrid:       MobileViT_Small, EdgeNeXt_Small, EfficientFormer_L1
+      ViT (pure):   DeiT_Tiny, TinyViT_5M, EfficientViT_M2
     """
 
     # Mapping from internal model names to timm identifiers
     TIMM_MODEL_NAMES = {
-        'ConvNeXt_Atto': 'convnext_atto',
-        'MobileNetV3_Large': 'mobilenetv3_large_100',
-        'EfficientNet_B0': 'efficientnet_b0',
-        'MobileViT_Small': 'mobilevit_s',
-        'EdgeNeXt_Small': 'edgenext_small',
+        # --- CNN pure ---
+        'EfficientNet_B0':    'efficientnet_b0',
+        'ConvNeXt_Atto':      'convnext_atto',
+        # --- Hybrid CNN + Transformer ---
+        'MobileViT_Small':    'mobilevit_s',
+        'EdgeNeXt_Small':     'edgenext_small',
         'EfficientFormer_L1': 'efficientformer_l1',
-        'ViT_Tiny': 'vit_tiny_patch16_224',
-        'DeiT_Tiny': 'deit_tiny_patch16_224'
+        # --- ViT pure ---
+        'DeiT_Tiny':          'deit_tiny_patch16_224',
+        'TinyViT_5M':         'tiny_vit_5m_224',
+        'CrossViT_Tiny':      'crossvit_tiny_240',
     }
 
     def __init__(self, config: Dict, dataset_path: str):
@@ -58,20 +66,14 @@ class ModelManager:
         print(f"Initializing model: {self.model_name}")
         if self.model_name == 'ResNet18':
             return self._initialize_resnet()
-        elif self.model_name == 'ShuffleNetV2':
-            return self._initialize_shufflenet()
         elif self.model_name in self.TIMM_MODEL_NAMES:
             return self._initialize_timm_model()
         else:
-            raise ValueError(f"Model '{self.model_name}' is not supported or was removed.")
+            raise ValueError(f"Model '{self.model_name}' is not supported. "
+                             f"Available models: ResNet18, {', '.join(self.TIMM_MODEL_NAMES.keys())}")
 
     def _initialize_resnet(self) -> nn.Module:
         model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        num_features = model.fc.in_features
-        return self._apply_custom_head(model, num_features, 'fc')
-
-    def _initialize_shufflenet(self) -> nn.Module:
-        model = models.shufflenet_v2_x1_0(weights=models.ShuffleNet_V2_X1_0_Weights.IMAGENET1K_V1)
         num_features = model.fc.in_features
         return self._apply_custom_head(model, num_features, 'fc')
 
