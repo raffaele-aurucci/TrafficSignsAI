@@ -35,7 +35,7 @@ class ModelManager:
         # --- ViT pure ---
         'DeiT_Tiny':          'deit_tiny_patch16_224',
         'TinyViT_5M':         'tiny_vit_5m_224',
-        'CrossViT_Tiny':      'crossvit_tiny_240',
+        'FastViT_T12':        'fastvit_t12',
     }
 
     def __init__(self, config: Dict, dataset_path: str):

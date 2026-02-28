@@ -65,8 +65,8 @@
       "image_size": [224],
       "num_custom_layers": [2]
     },
-    "CrossViT_Tiny": {
-      "image_size": [240],
+    "FastViT_T12": {
+      "image_size": [224],
       "num_custom_layers": [2]
     }
   }
