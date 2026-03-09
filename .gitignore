@@ -1,7 +1,7 @@
 /.idea
 /.venv
 
-3_classification_pruning_signs/logs
-3_classification_pruning_signs/csv
-3_classification_pruning_signs/run_dataset
-3_classification_pruning_signs/saved_models
+2_classification_signs/logs
+2_classification_signs/csv
+2_classification_signs/run_dataset
+2_classification_signs/saved_models
