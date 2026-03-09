@@ -20,7 +20,7 @@ class ModelManager:
     Model categories:
       CNN (pure):   ResNet18, EfficientNet_B0, ConvNeXt_Atto
       Hybrid:       MobileViT_Small, EdgeNeXt_Small, EfficientFormer_L1
-      ViT (pure):   DeiT_Tiny, TinyViT_5M, EfficientViT_M2
+      ViT (pure):   DeiT_Tiny, TinyViT_5M, FastViT_T12
     """
 
     # Mapping from internal model names to timm identifiers
@@ -34,8 +34,8 @@ class ModelManager:
         'EfficientFormer_L1': 'efficientformer_l1',
         # --- ViT pure ---
         'DeiT_Tiny':          'deit_tiny_patch16_224',
-        'TinyViT_5M':         'tiny_vit_5m_224',
-        'FastViT_T12':        'fastvit_t12',
+        'ViT_Tiny_Patch16':   'vit_tiny_patch16_224',
+        'ViT_Tiny_Patch32':   'vit_tiny_patch32_224',
     }
 
     def __init__(self, config: Dict, dataset_path: str):
