@@ -64,10 +64,6 @@
    "EfficientFormer_L1": {
       "image_size": [224],
       "num_custom_layers": [2]
-    },
-   "ViT_Tiny_Patch32": {
-      "image_size": [224],
-      "num_custom_layers": [2]
     }
   }
 }
