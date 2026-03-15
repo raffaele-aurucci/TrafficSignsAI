@@ -1,0 +1,24 @@
+{
+    "run_name": "yolo26s_balanced",
+    "model": "yolo26s.pt",
+    "setting": "balanced",
+    "status": "success",
+    "error": "",
+    "hyperparams": {
+        "epochs": 150,
+        "patience": 30,
+        "lr0": 0.005,
+        "imgsz": 640,
+        "batch": 16,
+        "optimizer": "AdamW",
+        "seed": 42
+    },
+    "metrics": {
+        "mAP50": 0.7329875354868568,
+        "mAP50_95": 0.5244812094937574,
+        "precision": 0.7567063070478676,
+        "recall": 0.6630788840107633,
+        "box_loss": "N/A",
+        "cls_loss": "N/A"
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "run_name": "yolo26s_precise",
+    "model": "yolo26s.pt",
+    "setting": "precise",
+    "status": "success",
+    "error": "",
+    "hyperparams": {
+        "epochs": 200,
+        "patience": 50,
+        "lr0": 0.005,
+        "imgsz": 640,
+        "batch": 16,
+        "optimizer": "AdamW",
+        "seed": 42
+    },
+    "metrics": {
+        "mAP50": 0.7450179522139201,
+        "mAP50_95": 0.538760434631562,
+        "precision": 0.7945586841883193,
+        "recall": 0.6605706754764962,
+        "box_loss": "N/A",
+        "cls_loss": "N/A"
+    }
+}

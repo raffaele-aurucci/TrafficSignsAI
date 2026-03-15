@@ -1,0 +1,24 @@
+{
+    "run_name": "yolo11n_standard",
+    "model": "yolo11n.pt",
+    "setting": "standard",
+    "status": "success",
+    "error": "",
+    "hyperparams": {
+        "epochs": 100,
+        "patience": 20,
+        "lr0": 0.01,
+        "imgsz": 640,
+        "batch": 16,
+        "optimizer": "AdamW",
+        "seed": 42
+    },
+    "metrics": {
+        "mAP50": 0.6412651681102386,
+        "mAP50_95": 0.43239557159724973,
+        "precision": 0.7248993726503795,
+        "recall": 0.5836556355250592,
+        "box_loss": "N/A",
+        "cls_loss": "N/A"
+    }
+}
