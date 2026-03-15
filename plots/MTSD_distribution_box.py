@@ -8,7 +8,7 @@ from tqdm import tqdm
 BASE_DIR = './all_mapillary'
 IMAGES_DIR = os.path.join(BASE_DIR, 'images')
 LABELS_DIR = os.path.join(BASE_DIR, 'labels')
-OUTPUT_PLOT_FILE = './distribution_signs.png'
+OUTPUT_PLOT_FILE = './MTSD_distribution_box.png'
 
 IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 
