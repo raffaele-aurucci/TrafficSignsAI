@@ -33,16 +33,47 @@ meaning: "how many standard deviations from the center to keep".
   - ε = 0.5 → ~38% of train samples kept
 """
 
+# ----------------------------------------------------------------------------
+# INFLUENCE SCORE CALCULATION
+# ----------------------------------------------------------------------------
 
-# ============================================================
-#                  INFLUENCE SCORE CALCULATION
-# ============================================================
 def compute_influence_scores(model, dataset, device="cpu"):
+    """
+    Compute a per-sample influence score based on the gradient norm of the
+    last trainable Linear layer.
+
+    For each sample, a forward pass and a backward pass are performed.
+    The influence score is the L2 norm of the concatenated gradients of the
+    last Linear layer's weight and bias tensors with respect to the loss.
+    A higher score indicates that the sample has a stronger effect on the
+    model's last-layer parameters and is therefore considered more
+    informative.
+
+    Scores are computed on the full dataset passed in (typically train +
+    valid concatenated) so that per-class statistics are estimated on as
+    many samples as possible.
+
+    Args:
+        model:   A PyTorch ``nn.Module`` in which at least one ``nn.Linear``
+                 layer has ``requires_grad=True``.  The last such layer is
+                 used for gradient computation.
+        dataset: A ``torch.utils.data.Dataset`` returning ``(image, label)``
+                 pairs.  Processed one sample at a time (``batch_size=1``).
+        device:  Device string passed to ``.to()``, e.g. ``'cpu'`` or
+                 ``'cuda'``.  Defaults to ``'cpu'``.
+
+    Returns:
+        A ``numpy.ndarray`` of shape ``(N,)`` containing one float score per
+        sample, in the same order as ``dataset``.
+
+    Raises:
+        ValueError: If no trainable ``nn.Linear`` layer is found in
+                    ``model``.
+    """
     model.eval()
     criterion = torch.nn.CrossEntropyLoss()
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    # Trova l'ultimo modulo Linear con requires_grad
     last_linear = None
     for module in model.modules():
         if isinstance(module, torch.nn.Linear) and any(p.requires_grad for p in module.parameters()):
@@ -51,7 +82,6 @@ def compute_influence_scores(model, dataset, device="cpu"):
     if last_linear is None:
         raise ValueError("[PRUNING] No trainable Linear layer found.")
 
-    # Raccogli tutti i parametri del layer (weight + bias)
     last_layer_params = [p for p in last_linear.parameters() if p.requires_grad]
 
     scores = []
@@ -69,25 +99,36 @@ def compute_influence_scores(model, dataset, device="cpu"):
             create_graph=False
         )
 
-        # Norma L2 concatenata su weight e bias
         combined_norm = torch.cat([g.flatten() for g in grads]).norm().item()
         scores.append(combined_norm)
 
     return np.array(scores)
 
 
-# ============================================================
+# ----------------------------------------------------------------------------
 # DATASET PRUNING AND IN-PLACE RECONSTRUCTION
-# ============================================================
+# ----------------------------------------------------------------------------
+
 def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, device="cpu"):
     """
-    [2;3;4 - Adaptive Criterion and Class Safeguard]
+    Run the full pruning pipeline on a single client's local dataset.
 
-    Calculates influence scores, applies the adaptive statistical criterion
-    per class, activates the safeguard if necessary, and physically rebuilds
-    the train/ and valid/ folders in-place.
+    Implements steps 2–4 of the pruning algorithm:
 
-    Expected structure of client_root:
+    2. **Adaptive z-score criterion** — for each class, influence scores are
+       z-score normalized using mu and sigma estimated on the combined
+       train + valid split.  Only train samples whose z-score falls within
+       ``[-ε, +ε]`` are retained.
+    3. **Class safeguard** — if the retained set for any class would fall
+       below ``max(10% of original train samples, 15)``, the discarded
+       samples with the smallest ``|z-score|`` (i.e. closest to the class
+       center) are recovered until the minimum is met.
+    4. **Physical in-place reconstruction** — the ``train/`` and ``valid/``
+       sub-folders are atomically replaced via a temporary directory; the
+       validation split is always preserved in full.
+
+    Expected directory layout of ``client_root``::
+
         client_root/
             train/
                 class_A/  img1.jpg  img2.jpg  ...
@@ -97,65 +138,68 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
                 class_B/  ...
 
     Args:
-        model:       PyTorch model for score calculation.
-        client_root: Root path of the client's dataset.
-        thresholds:  Float (global epsilon), dict {class_name: epsilon},
-                     or use the special value "skip" to exclude a class
-                     from pruning.
-        device:      'cpu' or 'cuda'.
+        model:       PyTorch ``nn.Module`` used to compute influence scores
+                     via :func:`compute_influence_scores`.
+        client_root: Absolute or relative path to the client's dataset root.
+        thresholds:  Epsilon value(s) controlling the pruning aggressiveness:
+
+                     * ``float`` — a single epsilon applied to every class.
+                     * ``dict`` — mapping ``{class_name: epsilon}``; missing
+                       classes default to ``1.0``.
+                     * ``"skip"`` (per-class) — the class is excluded from
+                       pruning and all its train samples are kept.
+
+                     Defaults to ``1.0``.
+        device:      Device string forwarded to
+                     :func:`compute_influence_scores`.  Defaults to
+                     ``'cpu'``.
+
+    Returns:
+        A ``dict`` with the following keys:
+
+        * ``samples_before``    — total samples (train + valid) before pruning.
+        * ``samples_after``     — total samples (train + valid) after pruning.
+        * ``reduction_pct``     — overall reduction percentage.
+        * ``train_kept``        — train samples kept.
+        * ``valid_kept``        — valid samples kept (always equal to the
+          original valid count).
+        * ``train_before``      — train samples before pruning.
+        * ``train_after``       — train samples after pruning.
+        * ``valid_preserved``   — valid samples preserved (same as ``valid_kept``).
+        * ``train_reduction_pct`` — percentage reduction on the train split only.
     """
     if thresholds is None:
         thresholds = 1.0
 
     print(f"[PRUNING] Starting on '{client_root}' with thresholds: {thresholds}")
 
-    # Load train + valid keeping original paths for reconstruction.
-    # train_count is the boundary index: [0, train_count) = train samples,
-    # [train_count, ...) = valid samples.
     dataset, all_samples, class_names, train_count = _load_datasets_keeping_structure(client_root)
-
-    # Compute scores on the entire local dataset (train + valid together).
-    # Using both splits gives more stable per-class mu/sigma estimates,
-    # which is important when each client holds few samples.
     scores = compute_influence_scores(model, dataset, device=device)
 
     all_paths = np.array([s[0] for s in all_samples])
     all_labels_idx = np.array([s[1] for s in all_samples])
 
-    # Mask: True = keep sample, False = discard.
-    # Valid samples are always kept regardless of their score —
-    # the validation set must remain intact for unbiased evaluation.
     keep_mask = np.zeros(len(scores), dtype=bool)
-    keep_mask[train_count:] = True  # preserve all valid samples unconditionally
+    keep_mask[train_count:] = True  # validation set is always fully preserved
 
     for cls_idx in np.unique(all_labels_idx):
         cls_name = class_names[cls_idx]
 
-        # Determine epsilon for this class
-        if isinstance(thresholds, dict):
-            eps = thresholds.get(cls_name, 1.0)
-        else:
-            eps = thresholds
+        eps = thresholds.get(cls_name, 1.0) if isinstance(thresholds, dict) else thresholds
 
-        # Only consider train samples for pruning (indices < train_count).
-        # Valid samples are already kept unconditionally above.
         indices = np.where((all_labels_idx == cls_idx) & (np.arange(len(scores)) < train_count))[0]
         cls_scores = scores[indices]
 
-        # Bypass: the class is not pruned
         if eps == "skip" or eps is None:
             keep_mask[indices] = True
             print(f"  -> Class '{cls_name}': SKIPPED (kept all {len(indices)})")
             continue
 
-        # Z-score normalization: mu and sigma computed on train+valid scores
-        # for this class, giving a more stable reference distribution.
         all_cls_indices = np.where(all_labels_idx == cls_idx)[0]
         all_cls_scores = scores[all_cls_indices]
         mu = all_cls_scores.mean()
         sigma = all_cls_scores.std()
 
-        # Edge case: all scores identical → zero variance, keep all train samples
         if sigma < 1e-8:
             keep_mask[indices] = True
             print(f"  -> Class '{cls_name}': zero variance, kept all {len(indices)} train samples "
@@ -163,42 +207,32 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
             continue
 
         z_scores = (cls_scores - mu) / sigma
-
-        # Criterion: keep train samples within [-ε, +ε] in z-score space.
         in_range = (z_scores >= -eps) & (z_scores <= eps)
         kept_indices_local = indices[in_range]
 
-        # CLASS SAFEGUARD: ensures minimum 10% of original train samples or 15 samples.
         min_samples = max(int(len(indices) * 0.1), 15)
 
         if len(kept_indices_local) < min_samples:
             print(f"[WARN] Class '{cls_name}': too reduced ({len(kept_indices_local)} < {min_samples}). "
                   f"Activating class safeguard.")
             needed = min_samples - len(kept_indices_local)
-
-            # Recover discarded train samples closest to center (lowest |z-score|)
-            rejected_mask = ~in_range
-            rejected_indices_local = indices[rejected_mask]
-            rejected_abs_z = np.abs(z_scores[rejected_mask])
-            best_rejected_idx = np.argsort(rejected_abs_z)[:needed]
-            recovered = rejected_indices_local[best_rejected_idx]
+            rejected_indices_local = indices[~in_range]
+            rejected_abs_z = np.abs(z_scores[~in_range])
+            recovered = rejected_indices_local[np.argsort(rejected_abs_z)[:needed]]
             kept_indices_local = np.concatenate([kept_indices_local, recovered])
 
         keep_mask[kept_indices_local] = True
         print(f"  -> Class '{cls_name}': {len(kept_indices_local)}/{len(indices)} train samples kept "
               f"(eps={eps:.2f}, mu={mu:.4f}, sigma={sigma:.4f})")
 
-    # Compute pruning stats on train only (valid is always fully kept)
     train_before = int(train_count)
     train_after = int(keep_mask[:train_count].sum())
-    valid_total = int(len(scores) - train_count)  # always fully preserved
+    valid_total = int(len(scores) - train_count)
 
     print(f"[PRUNING] Train: {train_after}/{train_before} kept | Valid: {valid_total}/{valid_total} (untouched)")
 
-    # Physical in-place reconstruction
     pruning_stats = _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_names, keep_mask)
 
-    # Enrich stats with train-only pruning metrics
     pruning_stats['train_before'] = train_before
     pruning_stats['train_after'] = train_after
     pruning_stats['valid_preserved'] = valid_total
@@ -206,21 +240,48 @@ def prune_and_redistribute_client_dataset(model, client_root, thresholds=None, d
     return pruning_stats
 
 
-# ============================================================
+# ----------------------------------------------------------------------------
 # DATASET LOADING WITH PATH TRACKING
-# ============================================================
+# ----------------------------------------------------------------------------
+
 def _load_datasets_keeping_structure(client_root):
     """
-    Loads train and valid via ImageFolder, concatenates them for global
-    score calculation, and returns the unified list of (path, class_idx).
+    Load the ``train`` and ``valid`` splits as ``ImageFolder`` datasets,
+    concatenate them into a single dataset for global score computation,
+    and return the full ordered list of ``(path, class_idx)`` pairs.
 
-    Note: ImageFolder assigns class indices in alphabetical order.
-    The structure does not require CSV annotation files.
+    The concatenation order is always ``train`` first, then ``valid``.
+    The returned ``train_count`` value marks the boundary between the two
+    splits inside ``all_samples``: indices ``[0, train_count)`` belong to
+    the train set and indices ``[train_count, ...)`` belong to the
+    validation set.  This boundary is used by the caller to restrict
+    pruning to train samples only.
+
+    Note:
+        ``ImageFolder`` assigns class indices in alphabetical order.
+        No CSV annotation files are required.
+
+    Args:
+        client_root: Path to the client's dataset root, which must contain
+                     ``train/`` and ``valid/`` sub-directories, each with
+                     one sub-folder per class.
 
     Returns:
-        ds_full (ConcatDataset): Complete train+valid dataset.
-        all_samples (list):      List of tuples (absolute_path, class_idx).
-        class_names (list):      Class names (ImageFolder order).
+        A four-tuple ``(ds_full, all_samples, class_names, train_count)``:
+
+        * ``ds_full`` (``ConcatDataset``) — the concatenated train + valid
+          dataset ready for use with a ``DataLoader``.
+        * ``all_samples`` (``list``) — ordered list of
+          ``(absolute_path, class_idx)`` tuples covering both splits.
+        * ``class_names`` (``list[str]``) — class names in ``ImageFolder``
+          alphabetical order.
+        * ``train_count`` (``int``) — number of samples in the train split;
+          used as the split boundary index.
+
+    Raises:
+        FileNotFoundError: If ``train/`` or ``valid/`` is missing inside
+                           ``client_root``.
+        ValueError:        If the class lists of the two splits differ.
     """
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -239,7 +300,6 @@ def _load_datasets_keeping_structure(client_root):
     ds_train = datasets.ImageFolder(train_dir, transform=transform)
     ds_valid = datasets.ImageFolder(valid_dir, transform=transform)
 
-    # Check consistency between train and valid classes
     if ds_train.classes != ds_valid.classes:
         raise ValueError(
             f"[PRUNING] Train and valid classes do not match:\n"
@@ -247,23 +307,54 @@ def _load_datasets_keeping_structure(client_root):
         )
 
     ds_full = ConcatDataset([ds_train, ds_valid])
-    # Samples ordered: first all train, then all valid.
-    # train_count marks the boundary: indices [0, train_count) are train,
-    # indices [train_count, ...) are valid.
     all_samples = ds_train.samples + ds_valid.samples
     train_count = len(ds_train.samples)
 
     return ds_full, all_samples, ds_train.classes, train_count
 
 
-# ============================================================
+# ----------------------------------------------------------------------------
 # PHYSICAL IN-PLACE RECONSTRUCTION
-# ============================================================
+# ----------------------------------------------------------------------------
+
 def _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_names, keep_mask):
     """
-    [4] Physically replaces train/ and valid/ with only the samples
-    selected by keep_mask. Operates via a temporary folder to ensure
-    atomicity and prevent data leakage between the two splits.
+    Physically replace the ``train/`` and ``valid/`` directories with only
+    the samples selected by ``keep_mask``.
+
+    The operation is performed via a temporary sibling directory
+    (``<client_root>_pruning_temp``) to ensure atomicity: the original
+    folders are removed only after all selected files have been
+    successfully copied, preventing partial or corrupt states in the event
+    of an unexpected interruption.
+
+    Each sample's destination split (``train`` or ``valid``) is inferred
+    from its original absolute path; samples whose path does not contain a
+    recognizable split component are skipped and counted separately.
+
+    Args:
+        client_root:    Path to the client's dataset root.
+        all_paths:      ``numpy.ndarray`` of absolute file paths, one per
+                        sample, in the same order as ``keep_mask``.
+        all_labels_idx: ``numpy.ndarray`` of integer class indices
+                        corresponding to ``all_paths``.
+        class_names:    List of class name strings indexed by
+                        ``all_labels_idx``.
+        keep_mask:      Boolean ``numpy.ndarray`` of shape ``(N,)``; ``True``
+                        means the sample is kept, ``False`` means it is
+                        discarded.
+
+    Returns:
+        A ``dict`` with the following keys:
+
+        * ``samples_before``  — total number of samples before pruning
+          (length of ``keep_mask``).
+        * ``samples_after``   — total number of samples copied to the new
+          directories.
+        * ``reduction_pct``   — percentage of samples removed, rounded to
+          two decimal places.
+        * ``train_kept``      — number of train samples kept.
+        * ``valid_kept``      — number of valid samples kept.
     """
     print("[PRUNING] Rebuilding folders (in-place operation)...")
 
@@ -287,7 +378,6 @@ def _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_name
         cls_name = class_names[all_labels_idx[i]]
         filename = os.path.basename(original_path)
 
-        # Determine the target split from the original path
         if sep + "train" + sep in original_path:
             dest_split = "train"
             count_train += 1
@@ -303,7 +393,6 @@ def _rebuild_dataset_in_place(client_root, all_paths, all_labels_idx, class_name
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy(original_path, os.path.join(dest_dir, filename))
 
-    # Atomic replacement: remove old folders and move the new ones
     shutil.rmtree(os.path.join(client_root, "train"))
     shutil.rmtree(os.path.join(client_root, "valid"))
     shutil.move(os.path.join(temp_root, "train"), os.path.join(client_root, "train"))

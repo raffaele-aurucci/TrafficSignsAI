@@ -28,7 +28,7 @@ class ModelManager:
         # --- CNN pure ---
         'EfficientNet_B0':    'efficientnet_b0',
         'ConvNeXt_Atto':      'convnext_atto',
-        # --- Hybrid CNN + Transformer ---
+        # --- Hybrid CNN + ViT ---
         'MobileViT_Small':    'mobilevit_s',
         'EdgeNeXt_Small':     'edgenext_small',
         'EfficientFormer_L1': 'efficientformer_l1',

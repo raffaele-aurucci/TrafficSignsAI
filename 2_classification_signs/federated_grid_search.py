@@ -24,12 +24,26 @@ MATCH_KEYS = [
     'models_percentage', 'aggregation_algorithm', 'pruning_threshold', 'num_custom_layers'
 ]
 
-
-# =============================================================================
+# ----------------------------------------------------------------------------
 # FINGERPRINT HELPERS
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def _normalize_fp_value(v) -> str:
+    """
+    Normalize a configuration value to a canonical string representation.
+
+    Converts numeric values that are whole numbers to their integer string form
+    (e.g. ``1.0`` → ``'1'``) to avoid false mismatches between ``'1'`` and
+    ``'1.0'`` when comparing fingerprints read from different sources (JSON
+    config vs CSV row).
+
+    Args:
+        v: The value to normalize. Can be any type; non-numeric values are
+           converted via ``str()``.
+
+    Returns:
+        A normalized string representation of ``v``.
+    """
     try:
         f = float(v)
         return str(int(f)) if f == int(f) else str(f)
@@ -38,12 +52,47 @@ def _normalize_fp_value(v) -> str:
 
 
 def make_config_fingerprint(config: dict) -> FrozenSet[Tuple[str, str]]:
+    """
+    Produce an immutable fingerprint for a hyperparameter configuration.
+
+    Builds a ``frozenset`` of ``(key, normalized_value)`` pairs from the keys
+    listed in ``MATCH_KEYS`` that are present in ``config``.  Using a frozenset
+    makes the fingerprint order-independent and directly hashable, so it can be
+    stored in a set or used as a dict key for O(1) deduplication lookups.
+
+    Args:
+        config: Dictionary containing the hyperparameter configuration.
+
+    Returns:
+        A ``FrozenSet`` of ``(str, str)`` tuples uniquely identifying the
+        configuration with respect to ``MATCH_KEYS``.
+    """
     return frozenset(
         (k, _normalize_fp_value(config[k])) for k in MATCH_KEYS if k in config
     )
 
 
 def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
+    """
+    Parse the global results CSV and build two sets of configuration fingerprints.
+
+    Reads the CSV once and classifies every row by its ``execution_phase`` column:
+
+    * **completed** — configurations for which a ``'Post-Pruning'`` row exists.
+      These are fully finished runs and can be skipped entirely.
+    * **incomplete** — configurations for which only a ``'Pre-Pruning'`` row
+      exists (i.e. the run crashed or was interrupted before the post-pruning
+      phase).  These should be cleaned up and re-queued.
+
+    Args:
+        global_csv_path: Absolute or relative path to the global grid-search
+            summary CSV file.
+
+    Returns:
+        A tuple ``(completed, incomplete)`` where both elements are sets of
+        ``FrozenSet`` fingerprints as produced by :func:`make_config_fingerprint`.
+        Both sets are empty if the file does not exist or cannot be read.
+    """
     completed: Set[FrozenSet] = set()
     pre_only: Set[FrozenSet] = set()
 
@@ -74,11 +123,25 @@ def build_fingerprint_sets(global_csv_path: str) -> Tuple[Set, Set]:
     return completed, incomplete
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # CLEANUP AND DUPLICATE HANDLING
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def remove_duplicate_configurations(global_csv_path: str) -> None:
+    """
+    Remove duplicate rows from the global results CSV, keeping the last occurrence.
+
+    A row is considered a duplicate when it shares the same values for all
+    ``MATCH_KEYS`` columns **and** ``execution_phase``.  Duplicates can arise if
+    a worker crashes after writing results but before the task is marked as done,
+    causing it to be re-executed on restart.
+
+    The file is overwritten in-place only when at least one duplicate is found;
+    if the file is absent or unreadable the function returns silently.
+
+    Args:
+        global_csv_path: Path to the global grid-search summary CSV file.
+    """
     if not os.path.exists(global_csv_path):
         return
     try:
@@ -104,6 +167,35 @@ def remove_duplicate_configurations(global_csv_path: str) -> None:
 
 def cleanup_incomplete_run(config: dict, global_csv_path: str,
                            models_dir: str, lock: multiprocessing.Lock) -> None:
+    """
+    Remove all traces of an incomplete run (Pre-Pruning phase only) so it can
+    be safely re-executed from scratch.
+
+    An *incomplete run* is one where the Pre-Pruning phase completed and was
+    written to the CSV, but the process terminated before the Post-Pruning phase
+    finished.  Leaving these orphan rows in place would cause
+    :func:`build_fingerprint_sets` to flag the configuration as incomplete on
+    every startup, so they must be purged before re-queuing.
+
+    The cleanup procedure:
+
+    1. Removes all matching rows from the global CSV.
+    2. Under ``lock``, inspects ``best_scores.json``:
+
+       * Compares the orphan run's best F1 against the score already stored.
+       * If the orphan score is strictly better, deletes the corresponding
+         model-weights ``.pkl`` file and the associated TA private-key file,
+         then removes the entry from ``best_scores.json``.
+       * If the stored score is equal or better, skips file deletion to avoid
+         destroying a valid checkpoint.
+
+    Args:
+        config:           Hyperparameter configuration dict of the incomplete run.
+        global_csv_path:  Path to the global grid-search summary CSV file.
+        models_dir:       Root directory where model checkpoints are stored.
+        lock:             Inter-process lock protecting ``best_scores.json``
+                          and the model files from concurrent access.
+    """
     model_name = config.get('model_name', 'unknown')
     print(f"[CLEAN & RESTART] Incomplete run (Pre-Pruning only) for {model_name} "
           f"(LR: {config.get('learning_rate')}).")
@@ -187,12 +279,44 @@ def cleanup_incomplete_run(config: dict, global_csv_path: str,
         _do_cleanup()
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # BEST MODEL SAVING
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def save_best_model_if_needed(run_summary: dict, best_weights: list, lock: multiprocessing.Lock,
                               models_dir: str, config: dict, phase: str) -> None:
+    """
+    Persist model weights to disk if the current run sets a new F1 record for
+    the given execution phase.
+
+    The function reads ``best_scores.json`` under ``lock``, compares the current
+    run's F1 score against the historical best for ``(model_name, phase)``, and —
+    if the current run is strictly better — atomically writes:
+
+    * ``best_scores.json`` — updated with the new metrics and config snapshot.
+    * ``best_{model_name}_{phase}.pkl`` — serialized model weights (pickle).
+    * ``best_{model_name}_{phase}_key.pkl`` — copy of the TA private key, if a
+      Trusted Aggregator port was used during this run.
+
+    The separation between ``metric_keys`` and ``config_keys_to_exclude`` ensures
+    that runtime-only fields (ports, paths, locks) are never persisted to the JSON
+    record, keeping it portable and human-readable.
+
+    Args:
+        run_summary:  Dictionary produced by the aggregator at the end of the
+                      federated training round; must contain at least
+                      ``'model_name'`` and ``'best_f1'`` (or ``'f1_score'``).
+        best_weights: List of serializable weight tensors/arrays to pickle.
+        lock:         Inter-process lock protecting ``best_scores.json`` and the
+                      model files from concurrent writes across workers.
+        models_dir:   Root directory under which per-model subdirectories are
+                      created to store checkpoints.
+        config:       Full hyperparameter configuration dict for this run; used
+                      to retrieve ``ta_port`` and to build the grid-search config
+                      snapshot stored in ``best_scores.json``.
+        phase:        Execution phase label, either ``'Pre-Pruning'`` or
+                      ``'Post-Pruning'``.
+    """
     if best_weights is None or run_summary is None:
         return
 
@@ -261,16 +385,52 @@ def save_best_model_if_needed(run_summary: dict, best_weights: list, lock: multi
         lock.release()
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # UTILITIES
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def load_json(filename: str) -> dict:
+    """
+    Load and parse a JSON file into a Python dictionary.
+
+    Args:
+        filename: Path to the JSON file to read.
+
+    Returns:
+        The deserialized contents of the file as a ``dict``.
+
+    Raises:
+        FileNotFoundError: If ``filename`` does not exist.
+        json.JSONDecodeError: If the file content is not valid JSON.
+    """
     with open(filename) as f:
         return json.load(f)
 
 
 def generate_configurations(base_config: dict, search_space: dict):
+    """
+    Generate all hyperparameter configurations from a Cartesian product of the
+    search space, merged on top of a base configuration.
+
+    Iterates over every combination of values in ``search_space`` using
+    ``itertools.product``.  For each combination, a shallow copy of
+    ``base_config`` is created and updated with the sampled hyperparameters,
+    so the base config is never mutated.
+
+    If ``search_space`` is empty, the function yields ``base_config`` unchanged
+    (single-configuration grid search).
+
+    Args:
+        base_config:   Dictionary of fixed parameters shared by all
+                       configurations (dataset path, number of classes, etc.).
+        search_space:  Dictionary mapping hyperparameter names to lists of
+                       candidate values, e.g.
+                       ``{'learning_rate': [0.01, 0.001], 'pruning_threshold': [0.3, 0.5]}``.
+
+    Yields:
+        A new ``dict`` for each combination, containing all keys from
+        ``base_config`` with the sampled hyperparameters overwritten.
+    """
     if not search_space:
         yield base_config
         return
@@ -282,6 +442,23 @@ def generate_configurations(base_config: dict, search_space: dict):
 
 
 def wait_for_server_ready(url: str, timeout: int = 60) -> bool:
+    """
+    Poll a URL until the server responds with HTTP 200 or the timeout expires.
+
+    Used after spawning the federated server thread to ensure it is fully
+    initialized and accepting connections before the clients are started.
+    Retries every second on ``ConnectionError`` (server not yet listening).
+
+    Args:
+        url:     The endpoint to poll, typically the server root
+                 (e.g. ``'http://127.0.0.1:5000/'``).
+        timeout: Maximum number of seconds to wait before giving up.
+                 Defaults to 60.
+
+    Returns:
+        ``True`` if the server returned HTTP 200 within the timeout window,
+        ``False`` otherwise.
+    """
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
@@ -293,11 +470,32 @@ def wait_for_server_ready(url: str, timeout: int = 60) -> bool:
     return False
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # SERVER THREAD
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def start_server_thread(config: dict, server_instance_ref: list) -> None:
+    """
+    Instantiate and run a :class:`federated_server.FederatedServer` inside the
+    calling thread.
+
+    The function also monkey-patches ``_reset_for_new_training`` on the server
+    so that the aggregator active *before* the pruning reset is stored as
+    ``server.pre_pruning_aggregator``.  This reference is later used by
+    :func:`_execute_single_config` to retrieve and save the Pre-Pruning
+    model weights independently of the Post-Pruning ones.
+
+    The server instance is appended to ``server_instance_ref`` (a shared list)
+    so that the caller can access it after ``server.run()`` returns.
+
+    Args:
+        config:              Full configuration dict for this run; forwarded
+                             directly to ``FederatedServer.__init__``.
+        server_instance_ref: A mutable list used to pass the created server
+                             object back to the calling scope.  Expected to be
+                             empty on entry; the server is appended as its first
+                             element.
+    """
     worker_id = config.get('worker_id', 'N/A')
     port = config['port']
     print(f"[Worker {worker_id}] Starting server on port {port}...")
@@ -320,21 +518,22 @@ def start_server_thread(config: dict, server_instance_ref: list) -> None:
     print(f"[Worker {worker_id}] Server terminated.")
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # ISOLATED SUBPROCESS — one per configuration
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def _execute_single_config(config: dict, csv_lock: multiprocessing.Lock) -> None:
     """
-    Esegue UNA singola configurazione FL in un processo figlio dedicato.
+    Runs a SINGLE FL configuration in a dedicated child process.
 
-    PERCHE' UN SUBPROCESS:
-    Python non garantisce la restituzione della RAM all'OS dopo gc.collect()
-    e del: l'allocatore glibc/PyMalloc mantiene la memoria nel proprio pool
-    interno per riutilizzarla in future allocazioni.
-    L'unica garanzia assoluta e' la morte del processo: quando questo ritorna,
-    il kernel dealloca l'intero spazio di indirizzamento — modello PyTorch,
-    array numpy dei pesi, dataset, Flask app, cache CUDA — senza eccezioni.
+    WHY A SUBPROCESS:
+    Python does not guarantee that RAM is returned to the OS after gc.collect()
+    or del: the glibc/PyMalloc allocator keeps memory in its internal pool
+    for future allocations.
+    The only absolute guarantee is process termination: when this function
+    returns, the kernel deallocates the entire address space — the PyTorch
+    model, weight numpy arrays, dataset, Flask app, CUDA cache — without
+    exception.
     """
     worker_id = config.get('worker_id', 'N/A')
     model_name = config.get('model_name', '?')
@@ -356,7 +555,7 @@ def _execute_single_config(config: dict, csv_lock: multiprocessing.Lock) -> None
 
         server_thread.join()
 
-        # -- WEIGHT SAVING (PRE & POST PRUNING) ------------------------------
+        # -- WEIGHT SAVING (PRE & POST PRUNING) --------------------------------
         if server_instance_ref:
             server_obj = server_instance_ref[0]
             models_dir = config.get('base_model_output_path', 'saved_models')
@@ -374,36 +573,33 @@ def _execute_single_config(config: dict, csv_lock: multiprocessing.Lock) -> None
                     post_agg.run_summary, post_agg.best_model_weights,
                     csv_lock, models_dir, config, phase="Post-Pruning"
                 )
-        # --------------------------------------------------------------------
+        # -----------------------------------------------------------------------
 
     except Exception as e:
         print(f"[Worker {worker_id}] Error in isolated subprocess for '{model_name}': {e}")
         import traceback
         traceback.print_exc()
 
-    # Nessun gc.collect() necessario: il processo sta per terminare e il kernel
-    # libera tutto il suo spazio di indirizzamento automaticamente.
 
-
-# =============================================================================
+# ----------------------------------------------------------------------------
 # WORKER PROCESS
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQueue,
                            base_port: int, csv_lock: multiprocessing.Lock) -> None:
     """
-    Worker long-running che preleva configurazioni dalla queue.
-    Per ogni configurazione lancia un subprocess figlio isolato e attende
-    il suo completamento prima di procedere con la successiva.
+    Long-running worker that pulls configurations from the queue.
+    For each configuration it launches an isolated child subprocess and waits
+    for its completion before moving on to the next one.
 
-    Gerarchia dei processi:
+    Process hierarchy:
         Main process
-          └─ Worker process  (questo, RAM stabile per tutta la grid search)
-               └─ Config subprocess  (uno per config, termina → OS libera tutto)
+          └─ Worker process  (this one — stable RAM for the entire grid search)
+               └─ Config subprocess  (one per config — exits → OS frees everything)
                     ├─ Server thread
                     └─ N Client threads
 
-    Il worker non alloca mai direttamente modelli o dataset.
+    The worker never directly allocates models or datasets.
     """
     print(f"--- Starting Grid Search Worker {worker_id} ---")
 
@@ -441,12 +637,12 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
             os.makedirs(config['log_dir'], exist_ok=True)
             os.makedirs(splitting_dir, exist_ok=True)
 
-            # Subprocess isolato: tutta la memoria pesante vive qui dentro.
-            # Quando config_proc.join() ritorna, il kernel ha gia' liberato tutto.
+            # Isolated subprocess: all heavy memory lives inside here.
+            # When config_proc.join() returns, the kernel has already freed everything.
             config_proc = multiprocessing.Process(
                 target=_execute_single_config,
                 args=(config, csv_lock),
-                daemon=False  # Non-daemon: attendiamo il completamento esplicito
+                daemon=False  # Non-daemon: we wait for explicit completion
             )
             config_proc.start()
             config_proc.join()
@@ -464,8 +660,8 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
             traceback.print_exc()
 
         finally:
-            # Pulizia del splitting_dir eseguita nel worker (non nel subprocess)
-            # per garantirla anche in caso di crash del subprocess.
+            # Splitting dir cleanup is performed in the worker (not in the subprocess)
+            # to guarantee cleanup even if the subprocess crashes.
             if splitting_dir and os.path.isdir(splitting_dir):
                 try:
                     shutil.rmtree(splitting_dir)
@@ -476,11 +672,33 @@ def run_grid_search_worker(worker_id: int, task_queue: multiprocessing.JoinableQ
             task_queue.task_done()
 
 
-# =============================================================================
+# ----------------------------------------------------------------------------
 # MAIN
-# =============================================================================
+# ----------------------------------------------------------------------------
 
 def main():
+    """
+    Entry point for the distributed grid search.
+
+    Orchestrates the full lifecycle of a federated grid search:
+
+    1. **Load configuration** — reads ``GRID_SEARCH_CONFIG_PATH`` to obtain the
+       base parameters, the common search space, and per-model search spaces.
+    2. **Deduplication** — calls :func:`remove_duplicate_configurations` to
+       sanitize the results CSV before inspecting it.
+    3. **Fingerprint scan** — calls :func:`build_fingerprint_sets` to classify
+       existing results as *completed* or *incomplete* in a single CSV pass.
+    4. **Queue population** — iterates over the full Cartesian product of
+       hyperparameters.  Completed configurations are skipped; incomplete ones
+       are cleaned up via :func:`cleanup_incomplete_run` before being re-queued;
+       new ones are enqueued directly.
+    5. **Worker launch** — spawns ``NUM_PARALLEL_EXECUTIONS`` worker processes
+       (:func:`run_grid_search_worker`), each consuming configurations from the
+       shared ``JoinableQueue``.
+    6. **Graceful shutdown** — waits for the queue to drain, then sends one
+       ``None`` sentinel per worker to signal termination, and joins all
+       processes.
+    """
     base_grid_config = load_json(GRID_SEARCH_CONFIG_PATH)
     csv_lock = multiprocessing.Lock()
     task_queue = multiprocessing.JoinableQueue()

@@ -325,8 +325,8 @@ class FederatedClient:
 
         if data.get('STOP', False):
             if self.enable_pruning:
-                # [PRUNING] Non uscire: aspetta 'start_pruning' (se selezionato)
-                # oppure 'skip_pruning' (se idle), poi 'server_ready_for_new_training'
+                # [PRUNING] Do not exit: wait for 'start_pruning' (if selected)
+                # or 'skip_pruning' (if idle), then 'server_ready_for_new_training'
                 self.logger.info(
                     "Training phase completed (STOP=True). "
                     "Pruning enabled — waiting for 'start_pruning' or 'skip_pruning' from server."
@@ -350,16 +350,16 @@ class FederatedClient:
         self.logger.info("[PRUNING] Received 'start_pruning' from server.")
 
         try:
-            # Ottieni i pesi mediati (con eventuale decryption)
+            # Retrieve the averaged weights (with optional decryption)
             averaged_weights = self._process_server_weights(data)
             if averaged_weights is None:
                 self.logger.error("[PRUNING] Failed to process server weights. Pruning aborted.")
                 return
 
-            # Carica i pesi nel modello locale
+            # Load the weights into the local model
             self.local_model.set_weights(averaged_weights)
 
-            # Accede al modello PyTorch sottostante (nn.Module)
+            # Access the underlying PyTorch model (nn.Module)
             pytorch_model = self.local_model.model
 
             device = self.config.get('device', 'cpu')
@@ -389,7 +389,7 @@ class FederatedClient:
 
         except Exception as e:
             self.logger.error("[PRUNING] Critical error during pruning: %s", e, exc_info=True)
-            # Emit anyway so the server doesn't hang waiting for this client
+            # Emit anyway so the server does not hang waiting for this client
             self.sio.emit('complete_pruning', {'pruning_stats': {}})
 
     def _on_skip_pruning(self):
@@ -408,14 +408,14 @@ class FederatedClient:
         """
         [PRUNING] Called after all clients have completed pruning and the server
         has reset its state. Reinitializes the ModelManager on the (now pruned)
-        dataset folder (same path, different file contents) and signals readiness.
+        dataset folder (same path, updated file contents) and signals readiness.
         """
         self.logger.info(
             "[PRUNING] Server ready for new training. "
             "Reinitializing ModelManager on pruned dataset: %s", self.dataset_path
         )
 
-        # Reinizializza ModelManager: rilegge la struttura delle cartelle aggiornata
+        # Reinitialize ModelManager: re-reads the updated directory structure
         self.local_model = ModelManager(
             config=self.config,
             dataset_path=self.dataset_path
