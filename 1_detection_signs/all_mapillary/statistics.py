@@ -1,15 +1,14 @@
 import cv2
 import os
 import math
-import statistics
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-BASE_DIR = '../../datasets/all_mapillary'
+BASE_DIR = './all_mapillary'
 IMAGES_DIR = os.path.join(BASE_DIR, 'images')
 LABELS_DIR = os.path.join(BASE_DIR, 'labels')
-OUTPUT_PLOT_FILE = 'distribution_signs.png'
+OUTPUT_PLOT_FILE = './distribution_signs.png'
 
 IMG_EXTENSIONS = ('.jpg', '.jpeg', '.png')
 
@@ -21,7 +20,7 @@ def analyze_dataset():
     print("-" * 50)
 
     if not os.path.exists(IMAGES_DIR) or not os.path.exists(LABELS_DIR):
-        print("Error: Directory 'images' or 'labels' doesn't exists.")
+        print("Error: Directory 'images' or 'labels' doesn't exist.")
         return
 
     all_image_paths = []
@@ -43,7 +42,7 @@ def analyze_dataset():
     count_images_processed = 0
 
 
-    for img_path in tqdm(all_image_paths, desc="Analisi dimensioni", unit="img"):
+    for img_path in tqdm(all_image_paths, desc="Analyzing dimensions", unit="img"):
 
         file_name = os.path.basename(img_path)
         base_name = os.path.splitext(file_name)[0]
@@ -61,7 +60,7 @@ def analyze_dataset():
             count_missing_labels += 1
             continue
 
-        # Read images
+        # Read image
         img = cv2.imread(img_path)
         if img is None: continue
         h_img, w_img = img.shape[:2]
@@ -78,7 +77,7 @@ def analyze_dataset():
                     w_norm = float(parts[3])
                     h_norm = float(parts[4])
 
-                    # Converted in pixel
+                    # Convert to pixels
                     w_px = w_norm * w_img
                     h_px = h_norm * h_img
                     area = w_px * h_px
@@ -145,6 +144,9 @@ def analyze_dataset():
             # Plot
             plt.figure(figsize=(12, 6))
 
+            # Use a serif font family throughout the plot
+            plt.rcParams['font.family'] = 'serif'
+
             safe_min = max(1, min_val)
             bins = np.logspace(np.log10(safe_min), np.log10(max_val), 100)
 
@@ -156,33 +158,43 @@ def analyze_dataset():
                 weights=weights,
                 color='skyblue',
                 edgecolor='black',
-                alpha=0.7,
+                linewidth=0.6,
+                alpha=0.8,
                 label='Bounding Box Distribution'
             )
 
-            # log scale
+            # Log scale on x-axis
             plt.xscale('log')
 
-            # Vertical Line for avg and median
-            plt.axvline(avg_area, color='red', linestyle='dashed', linewidth=2, label=f'Avg: {avg_area:.0f} px²')
+            # Mean & Median vertical lines
+            plt.axvline(avg_area, color='red', linestyle='dashed', linewidth=2,
+                        label=f'Mean: {avg_area:.0f} px²')
             plt.axvline(median_area, color='green', linestyle='solid', linewidth=2,
                         label=f'Median: {median_area:.0f} px²')
 
-            plt.title("Traffic Sign Bounding Box Size Distribution (Log Scale)")
-            plt.xlabel('Area (Square Pixels) - Log Scale')
-            plt.ylabel('Percentage of Bounding Boxes (%)')
+            # Bold serif title and axis labels with slightly larger fonts
+            plt.title("Traffic Sign Bounding Box Size Distribution",
+                      fontsize=16, pad=20, fontweight='bold', fontfamily='serif')
+            plt.xlabel("Area (square pixels, log scale)", fontsize=14, fontfamily='serif')
+            plt.ylabel("Bounding Boxes (%)", fontsize=14, fontfamily='serif')
 
-            plt.legend()
+            # Remove unnecessary spines
+            ax = plt.gca()
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
 
-            plt.grid(True, which="both", ls="-", alpha=0.2)
-            plt.grid(True, which="major", ls="-", alpha=0.5)
+            # Increase tick label size and apply serif font
+            ax.tick_params(axis='both', which='major', labelsize=12)
+            for label in ax.get_xticklabels() + ax.get_yticklabels():
+                label.set_fontfamily('serif')
 
+            plt.legend(frameon=False, fontsize=12, prop={'family': 'serif'})
+
+            plt.tight_layout()
             plt.savefig(OUTPUT_PLOT_FILE, dpi=300)
 
-            # plt.show()
-
     else:
-        print("Nothing box found.")
+        print("No boxes found.")
 
 
 if __name__ == "__main__":
@@ -202,7 +214,7 @@ if __name__ == "__main__":
 #     Dim:  3.9 x 2.1 px
 #     Area: 8 px² (square equivalent 2 px)
 #
-# [2] AVERAGE VALUES (The “Norm”):
+# [2] AVERAGE VALUES (The "Norm"):
 #     Arithmetic Mean: 9102 px² (square equivalent 95 px)
 #     Median (Typical): 1604 px² (square equivalent 40 px)
 #
