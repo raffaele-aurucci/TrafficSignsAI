@@ -1,25 +1,27 @@
 # An Efficient Federated Learning Method for Damaged Road Sign Detection in Smart Cities
 
-## Introduction
+## Scope
 
-**Road safety** is an increasingly important priority for public administrations worldwide. In this context, the proper maintenance of **vertical road signage** plays a crucial role. However, it becomes **costly and inefficient** when relying on traditional **manual inspection methods**. The **smart city paradigm**, combined with recent advances in **Artificial Intelligence (AI)**, offers new opportunities to **automate this process**.
+**Road safety** is a growing priority for public administrations worldwide. Traditional
+**manual inspection of road signage** is costly and inefficient — the **smart city paradigm**
+combined with **AI** offers a viable path to automate this process.
 
-This **project** proposes and evaluates a **distributed pipeline for road sign detection and classification**, optimized for **deployment on edge devices**. The architecture integrates **three main modules**:
+This project proposes a **distributed pipeline for road sign detection and classification**
+optimized for **edge devices**, integrating three modules:
 
-- **Object Detection module (client-side)** – uses **lightweight YOLO models** to detect traffic signs.
-- **Federated Learning module (server-side)** – coordinates the **distributed training of classifiers** that determine the **condition of the sign (damaged or healthy)**.
-- **Data Pruning module (client-side)** – selects the **most informative samples** using **influence scores** computed on the **last layer of the global model**.
+- **Object Detection (client-side)** — lightweight YOLO models for traffic sign detection
+- **Federated Learning (server-side)** — distributed training of classifiers for sign condition (damaged / healthy)
+- **Data Pruning (client-side)** — influence-score-based sample selection on the last model layer
 
-Experiments conducted on the **Mapillary Traffic Sign Dataset (MTSD)** show that **preliminary filtering of small bounding boxes** significantly improves the performance of lightweight models. 
-In particular, **YOLO26s** achieves: **F1-score = 0.7214** compared to **0.6326** obtained **without filtering**. In the **Federated Learning setting**, three architectural families were evaluated:
+Experiments on the **Mapillary Traffic Sign Dataset (MTSD)** show that filtering small
+bounding boxes significantly boosts detection — **YOLO26s reaches F1 = 0.7214** vs 0.6326
+without filtering. In the federated setting, **Vision Transformers** emerge as the best
+trade-off between efficiency, robustness, and accuracy. Data pruning reduces training
+time by **up to 22%** while keeping performance loss **within 2 percentage points**.
 
-- **Convolutional Neural Networks (CNN)**
-- **Vision Transformers (ViT)**
-- **Hybrid models (CNN + ViT)**
+### Pipeline for Detection & Classification Road Signs
 
-using different **aggregation strategies** and **pruning thresholds**. Among the tested models, **Vision Transformers (ViT)** emerge as the **best trade-off between computational efficiency, pruning robustness, and overall accuracy**. The results demonstrate that targeted **data pruning** can **reduce training time by up to 22%**, while maintaining **predictive performance within 2 percentage points**.
-
-## Pipeline for Detection & Classification Road Signs
+<img src="plots/pipeline.png" width="100%"/>
 
 The system follows a **distributed pipeline** where **edge devices** and the **central server** collaboratively train the model using **Federated Learning**.
 
@@ -41,7 +43,6 @@ The system follows a **distributed pipeline** where **edge devices** and the **c
 
 9. **Model Redistribution:** The new global model is redistributed to the edge devices to repeat the training cycle.
 
-<img src="plots/pipeline.png" width="100%"/>
 
 ## Data Pruning Module
 
