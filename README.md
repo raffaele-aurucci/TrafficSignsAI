@@ -3,21 +3,23 @@
 ## Scope
 
 **Road safety** is a growing priority for public administrations worldwide. Traditional
-**manual inspection of road signage** is costly and inefficient — the **smart city paradigm**
+**manual inspection of road signage** is costly and inefficient. The **smart city paradigm**
 combined with **AI** offers a viable path to automate this process.
 
 This project proposes a **distributed pipeline for road sign detection and classification**
 optimized for **edge devices**, integrating three modules:
 
 - **Object Detection (client-side)** — lightweight YOLO models for traffic sign detection
-- **Federated Learning (server-side)** — distributed training of classifiers for sign condition (damaged / healthy)
+- **Federated Learning (server-side)** — distributed training of classifiers for sign condition (damaged or healthy)
 - **Data Pruning (client-side)** — influence-score-based sample selection on the last model layer
 
 Experiments on the **Mapillary Traffic Sign Dataset (MTSD)** show that filtering small
-bounding boxes significantly boosts detection — **YOLO26s reaches F1 = 0.7214** vs 0.6326
-without filtering. In the federated setting, **Vision Transformers** emerge as the best
-trade-off between efficiency, robustness, and accuracy. Data pruning reduces training
-time by **up to 22%** while keeping performance loss **within 2 percentage points**.
+bounding boxes significantly boosts detection. **YOLO26s reaches F1 = 0.7214** vs 0.6326
+without filtering. In the federated setting, three architectural families were evaluated:
+**Convolutional Neural Networks (CNN)**, **Vision Transformers (ViT)**, and **hybrid models (CNN + ViT)**.
+Among these, **Vision Transformers** emerge as the best trade-off between efficiency,
+robustness, and accuracy. Data pruning reduces training time by **up to 22%** while
+keeping performance loss **within 2 percentage points**.
 
 ### Pipeline for Detection & Classification Road Signs
 
