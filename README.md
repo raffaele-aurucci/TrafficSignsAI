@@ -11,17 +11,13 @@ This **project** proposes and evaluates a **distributed pipeline for road sign d
 - **Data Pruning module (client-side)** – selects the **most informative samples** using **influence scores** computed on the **last layer of the global model**.
 
 Experiments conducted on the **Mapillary Traffic Sign Dataset (MTSD)** show that **preliminary filtering of small bounding boxes** significantly improves the performance of lightweight models. 
-In particular, **YOLO26s** achieves: **F1-score = 0.7214** compared to **0.6326** obtained **without filtering**.
-
-In the **Federated Learning setting**, three architectural families were evaluated:
+In particular, **YOLO26s** achieves: **F1-score = 0.7214** compared to **0.6326** obtained **without filtering**. In the **Federated Learning setting**, three architectural families were evaluated:
 
 - **Convolutional Neural Networks (CNN)**
 - **Vision Transformers (ViT)**
 - **Hybrid models (CNN + ViT)**
 
-using different **aggregation strategies** and **pruning thresholds**. Among the tested models, **Vision Transformers (ViT)** emerge as the **best trade-off between computational efficiency, pruning robustness, and overall accuracy**. 
-
-The results demonstrate that targeted **data pruning** can **reduce training time by up to 22%**, while maintaining **predictive performance within 2 percentage points**.
+using different **aggregation strategies** and **pruning thresholds**. Among the tested models, **Vision Transformers (ViT)** emerge as the **best trade-off between computational efficiency, pruning robustness, and overall accuracy**. The results demonstrate that targeted **data pruning** can **reduce training time by up to 22%**, while maintaining **predictive performance within 2 percentage points**.
 
 ## Pipeline for Detection & Classification Road Signs
 
@@ -45,7 +41,7 @@ The system follows a **distributed pipeline** where **edge devices** and the **c
 
 9. **Model Redistribution:** The new global model is redistributed to the edge devices to repeat the training cycle.
 
-![](plots/pipeline.png)
+<img src="plots/pipeline.png" width="85%"/>
 
 ## Data Pruning Module
 
